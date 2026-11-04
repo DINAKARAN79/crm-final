@@ -12,6 +12,7 @@ import {
   type DialpadMonitorEntry,
 } from "@/lib/bizcall-dialpad";
 import { requestDialerCommand } from "@/lib/telephony-client";
+import { getSafeTelephonyReturnTo } from "@/lib/telephony-navigation";
 import { useAuth } from "@/contexts/auth-context";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
@@ -43,6 +44,7 @@ type TelephonySettings = {
   callsPerMinute: number;
   maskNumbers: boolean;
   sendTenantIdInDial: boolean;
+  autoDialOnClick: boolean;
   blockDnc: boolean;
   dncNumbers: string;
 };
@@ -76,6 +78,10 @@ export default function TelephonySettingsPage() {
   const { toast } = useToast();
   const { user, tenant, isLoading, isAuthenticated, isAdmin, isSuperAdmin } = useAuth();
   const tenantId = isSuperAdmin ? searchParams.get("tenantId") || "" : "";
+  const returnTo = getSafeTelephonyReturnTo(
+    searchParams.get("returnTo"),
+    typeof window === "undefined" ? "https://crm.invalid" : window.location.origin,
+  );
   const [loading, setLoading] = React.useState(true);
   const [saving, setSaving] = React.useState(false);
   const [testing, setTesting] = React.useState(false);
@@ -106,6 +112,7 @@ export default function TelephonySettingsPage() {
   const [callsPerMinute, setCallsPerMinute] = React.useState(10);
   const [maskNumbers, setMaskNumbers] = React.useState(false);
   const [sendTenantIdInDial, setSendTenantIdInDial] = React.useState(true);
+  const [autoDialOnClick, setAutoDialOnClick] = React.useState(true);
   const [blockDnc, setBlockDnc] = React.useState(false);
   const [dncNumbers, setDncNumbers] = React.useState("");
   const [agents, setAgents] = React.useState<Array<{ userId: string; userName: string; profileId: string | null; profileName: string; canUseTelephony: boolean; registeredInBizcall: string; lastCallAt: string | null }>>([]);
@@ -120,9 +127,10 @@ export default function TelephonySettingsPage() {
   const currentSettings = {
     clickToCallUrl, authHeaderName, authToken, callerId, isActiveSetting, allowTestUrl,
     callIdFieldPath, dialpadUrl, dialpadMode, callMethod, defaultDockState, theme,
-    productionOrigin, duplicateGuardSeconds, callsPerMinute, maskNumbers, sendTenantIdInDial, blockDnc, dncNumbers,
+    productionOrigin, duplicateGuardSeconds, callsPerMinute, maskNumbers, sendTenantIdInDial, autoDialOnClick, blockDnc, dncNumbers,
   };
   const isDirty = baseline !== null && baseline !== JSON.stringify(currentSettings);
+  const highlightTimers = React.useRef<number[]>([]);
 
   const applySettings = (data: TelephonySettings) => {
     setClickToCallUrl(data.clickToCallUrl || DEFAULT_CLICK_URL);
@@ -148,6 +156,7 @@ export default function TelephonySettingsPage() {
     setCallsPerMinute(data.callsPerMinute || 10);
     setMaskNumbers(Boolean(data.maskNumbers));
     setSendTenantIdInDial(data.sendTenantIdInDial ?? true);
+    setAutoDialOnClick(data.autoDialOnClick ?? true);
     setBlockDnc(Boolean(data.blockDnc));
     setDncNumbers(data.dncNumbers || "");
     setBaseline(JSON.stringify({
@@ -168,6 +177,7 @@ export default function TelephonySettingsPage() {
       callsPerMinute: data.callsPerMinute || 10,
       maskNumbers: Boolean(data.maskNumbers),
       sendTenantIdInDial: data.sendTenantIdInDial ?? true,
+      autoDialOnClick: data.autoDialOnClick ?? true,
       blockDnc: Boolean(data.blockDnc),
       dncNumbers: data.dncNumbers || "",
     }));
@@ -245,8 +255,42 @@ export default function TelephonySettingsPage() {
           });
         });
     }
-    return () => { active = false; };
+    return () => { active = false;     };
   }, [isAdmin, isAuthenticated, isSuperAdmin, tenantId, toast]);
+
+  React.useEffect(() => {
+    const highlightHashTarget = () => {
+      const targetId = window.location.hash.slice(1);
+      if (!targetId) return;
+      const target = document.getElementById(targetId);
+      if (!target) return;
+      const prefersReducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+      target.scrollIntoView({ behavior: prefersReducedMotion ? "auto" : "smooth", block: "center" });
+
+      const highlight = (element: HTMLElement) => {
+        element.classList.add("outline", "outline-2", "outline-sky-500", "outline-offset-2");
+        const timer = window.setTimeout(() => {
+          element.classList.remove("outline", "outline-2", "outline-sky-500", "outline-offset-2");
+        }, 2000);
+        highlightTimers.current.push(timer);
+      };
+
+      highlight(target);
+      if (targetId === "agents" && (isAdmin || isSuperAdmin) && user?.id) {
+        const currentAgent = document.getElementById("telephony-current-agent");
+        if (currentAgent) highlight(currentAgent);
+      }
+    };
+
+    const frame = window.requestAnimationFrame(highlightHashTarget);
+    window.addEventListener("hashchange", highlightHashTarget);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("hashchange", highlightHashTarget);
+      highlightTimers.current.forEach((timer) => window.clearTimeout(timer));
+      highlightTimers.current = [];
+    };
+  }, [agents.length, isAdmin, isSuperAdmin, loading, user?.id]);
 
   React.useEffect(() => {
     if (!isDirty) return;
@@ -306,6 +350,7 @@ export default function TelephonySettingsPage() {
         callsPerMinute,
         maskNumbers,
         sendTenantIdInDial,
+        autoDialOnClick,
         blockDnc,
         dncNumbers,
         ...(trimmedKey ? { authToken: trimmedKey } : {}),
@@ -431,6 +476,12 @@ export default function TelephonySettingsPage() {
       : "bg-slate-100 text-slate-600";
   return (
     <div className="mx-auto max-w-3xl space-y-6">
+      {returnTo ? (
+        <Link href={returnTo} className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground">
+          <ArrowLeft className="h-4 w-4" />
+          Back to lead
+        </Link>
+      ) : null}
       <div className="flex items-center gap-3">
         <Link href={tenantId ? `/setup?tenantId=${encodeURIComponent(tenantId)}` : "/setup"} className="text-muted-foreground hover:text-primary">
           <ArrowLeft className="h-4 w-4" />
@@ -496,6 +547,7 @@ export default function TelephonySettingsPage() {
           ) : null}
 
           <form
+            id="bizcall-connection"
             className="space-y-5 rounded-xl border border-sky-100 bg-white p-5 shadow-sm"
             onSubmit={(event) => {
               event.preventDefault();
@@ -580,7 +632,7 @@ export default function TelephonySettingsPage() {
               </div>
             ) : null}
 
-            <section className="space-y-4 border-t pt-5">
+            <section id="dialpad" className="space-y-4 border-t pt-5">
               <div>
                 <h2 className="font-medium">Dialpad</h2>
                 <p className="text-sm text-muted-foreground">Configure how agents access the Bizcall dialpad.</p>
@@ -596,7 +648,6 @@ export default function TelephonySettingsPage() {
                   <select className="h-10 w-full rounded-md border bg-background px-3" value={dialpadMode} onChange={(event) => {
                     const mode = event.target.value as "DOCKED" | "NEW_TAB";
                     setDialpadMode(mode);
-                    if (mode === "NEW_TAB" && callMethod === "DIALPAD_MESSAGE") setCallMethod("SERVER_API");
                   }}>
                     <option value="DOCKED">Docked panel inside the CRM (recommended)</option>
                     <option value="NEW_TAB">Open in a new tab</option>
@@ -606,10 +657,10 @@ export default function TelephonySettingsPage() {
                   <span className="font-medium">Call method per click</span>
                   <select className="h-10 w-full rounded-md border bg-background px-3" value={callMethod} onChange={(event) => setCallMethod(event.target.value as "SERVER_API" | "DIALPAD_MESSAGE")}>
                     <option value="SERVER_API">Server API (Bizcall rings agent, then customer)</option>
-                    <option value="DIALPAD_MESSAGE" disabled={dialpadMode === "NEW_TAB"}>Dialpad message (DIAL via postMessage)</option>
+                    <option value="DIALPAD_MESSAGE">Dialpad message (DIAL via postMessage)</option>
                   </select>
                   <span className="block text-xs text-muted-foreground">Only the selected method runs for a click. Never both.</span>
-                  {dialpadMode === "NEW_TAB" ? <span className="block text-xs text-muted-foreground">Dialpad message mode is available only in the docked panel.</span> : null}
+                  {callMethod === "DIALPAD_MESSAGE" ? <span className="block text-xs text-muted-foreground">Clicking a number sends a DIAL message to the Bizcall dialpad. The agent&apos;s dialpad must be open and ONLINE.</span> : null}
                 </label>
                 <label className="space-y-2 text-sm">
                   <span className="font-medium">Default dock state</span>
@@ -673,7 +724,10 @@ export default function TelephonySettingsPage() {
                 </label>
               </div>
               <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={maskNumbers} onChange={(event) => setMaskNumbers(event.target.checked)} /> Mask customer numbers for agents</label>
-              <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={sendTenantIdInDial} onChange={(event) => setSendTenantIdInDial(event.target.checked)} /> Send tenantId in DIAL (optional Bizcall context)</label>
+              <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={sendTenantIdInDial} onChange={(event) => setSendTenantIdInDial(event.target.checked)} /> Send tenantId in DIAL</label>
+              <p className="-mt-1 text-xs text-muted-foreground">Bizcall may ignore this extra field.</p>
+              <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={autoDialOnClick} onChange={(event) => setAutoDialOnClick(event.target.checked)} /> Auto-dial on click</label>
+              <p className="-mt-1 text-xs text-muted-foreground">When off, the number is prefilled in the dialpad; the agent must press the green call button.</p>
               <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={blockDnc} onChange={(event) => setBlockDnc(event.target.checked)} /> Block Do-Not-Call numbers</label>
               <div className="space-y-2">
                 <Label htmlFor="dnc-numbers">Do-Not-Call numbers (E.164, one per line)</Label>
@@ -689,7 +743,7 @@ export default function TelephonySettingsPage() {
 
           <PostMessageMonitor tenantId={tenant?.id || tenantId} userId={user?.id || ""} />
 
-          <section className="space-y-3 rounded-xl border bg-card p-5 shadow-sm">
+          <section id="agents" className="space-y-3 rounded-xl border bg-card p-5 shadow-sm">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="font-medium">Agents</h2>
@@ -700,7 +754,7 @@ export default function TelephonySettingsPage() {
             {agents.length ? (
               <ul className="divide-y">
                 {agents.map((agent) => (
-                  <li key={agent.userId} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
+                  <li id={agent.userId === user?.id ? "telephony-current-agent" : undefined} key={agent.userId} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
                     <span>{agent.userName} <span className="text-muted-foreground">({agent.profileName})</span></span>
                     <span className="flex items-center gap-2">
                       <span>{agent.canUseTelephony ? "Permission granted" : "No permission"}</span>

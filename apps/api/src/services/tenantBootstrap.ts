@@ -2,6 +2,7 @@ import type { Prisma } from '@prisma/client';
 import { BOOKING_FIELDS, BOOKING_STAGE_OPTIONS, BOOKING_OBJECT, bookingLayoutSections } from '@dct-crm/shared';
 import { REPORT_OBJECTS, type ReportFieldType } from '../reports/report-metadata';
 import { ensureUserObject } from './userObject';
+import { DEFAULT_ADMIN_PERMISSION_NAMES, REQUIRED_PERMISSION_NAMES } from './requiredPermissionCatalog';
 
 const STANDARD_OBJECTS = [
   { name: 'Lead', label: 'Lead', pluralLabel: 'Leads', icon: 'user', description: 'Manage sales leads' },
@@ -30,19 +31,6 @@ const MODULE_READ_PERMISSIONS = [
   'USER_READ',
   'ROLE_READ',
   'PROFILE_READ',
-];
-
-const DEFAULT_ADMIN_PERMISSIONS = [
-  'FULL_SYSTEM_ACCESS',
-  ...MODULE_READ_PERMISSIONS,
-  'LEAD_CREATE',
-  'SITE_VISIT_CREATE',
-  'PROJECT_CREATE',
-  'UNIT_CREATE',
-  'TASK_CREATE',
-  'REPORT_CREATE',
-  'DASHBOARD_CREATE',
-  'TELEPHONY_CALL',
 ];
 
 export interface TenantBootstrapResult {
@@ -131,7 +119,7 @@ export async function bootstrapTenant(
     create: { tenantId, name: 'Admin', description: 'Full company administration', isSystem: true },
     select: { id: true },
   });
-  const allPermissionNames = DEFAULT_ADMIN_PERMISSIONS;
+  const allPermissionNames = [...new Set([...REQUIRED_PERMISSION_NAMES, ...DEFAULT_ADMIN_PERMISSION_NAMES])];
   await tx.permission.createMany({
     data: allPermissionNames.map((name) => {
       const { module, action } = permissionParts(name);
@@ -146,7 +134,7 @@ export async function bootstrapTenant(
     skipDuplicates: true,
   });
   await tx.permission.updateMany({
-    where: { name: { in: allPermissionNames }, isActive: false },
+    where: { name: { in: [...DEFAULT_ADMIN_PERMISSION_NAMES] }, isActive: false },
     data: { isActive: true },
   });
 
@@ -156,7 +144,7 @@ export async function bootstrapTenant(
   });
   const permissionIdsByName = new Map(permissions.map(({ id, name }) => [name, id]));
   await tx.userProfilePermission.createMany({
-    data: allPermissionNames.flatMap((name) => {
+    data: DEFAULT_ADMIN_PERMISSION_NAMES.flatMap((name) => {
       const permissionId = permissionIdsByName.get(name);
       return permissionId ? [{ profileId: adminProfile.id, permissionId }] : [];
     }),

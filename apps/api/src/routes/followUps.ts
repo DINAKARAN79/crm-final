@@ -18,7 +18,7 @@ router.use(authenticate);
 router.get('/', authorize('FollowUp', 'read'), async (req: AuthRequest, res: Response) => {
   try {
     await normalizeOverdueFollowUps(req.tenantId!);
-    const { page = 1, limit = 20, isCompleted, status, leadId, ownerId, search, startDate, endDate, sortBy = 'dueDate', sortOrder = 'asc' } = req.query;
+    const { page = 1, limit = 20, isCompleted, status, leadId, ownerId, search, startDate, endDate } = req.query;
     const skip = (Number(page) - 1) * Number(limit);
 
     const access = followUpAccessWhere(req.user!, req.tenantId!);
@@ -160,8 +160,10 @@ router.get('/:id', authorize('FollowUp', 'read'), async (req: AuthRequest, res: 
             leadNumber: true,
             firstName: true,
             lastName: true,
+            company: true,
             phone: true,
             mobile: true,
+            secondaryPhone: true,
             email: true,
             status: true,
             source: true,

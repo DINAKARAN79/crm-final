@@ -6,6 +6,7 @@ type DialRequest = {
   leadId: string;
   phoneField: ClickToCallField;
   leadName: string;
+  taskId?: string;
 };
 
 type DialHandler = (request: DialRequest) => Promise<ClickToCallOutcome>;

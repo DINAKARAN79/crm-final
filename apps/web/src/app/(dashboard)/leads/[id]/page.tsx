@@ -30,7 +30,7 @@ import { useParams, useRouter } from "next/navigation";
 
 import { useAuth } from "@/contexts/auth-context";
 
-import { leadApi, siteVisitApi, activityApi, callDetailsApi, followUpApi, objectManagerApi, projectApi, enquiryApi } from "@/lib/api";
+import { impersonationMeta, leadApi, siteVisitApi, activityApi, callDetailsApi, followUpApi, objectManagerApi, projectApi, enquiryApi } from "@/lib/api";
 import { clickToCallToast, type ClickToCallField } from "@/lib/click-to-call";
 import { requestLeadCall } from "@/lib/telephony-client";
 import { maskTelephonyNumber, useTelephonyActive, useTelephonyNumberMasking, useTelephonyReasonCode } from "@/lib/telephony-client";
@@ -41,6 +41,7 @@ import { LeadStatusPath } from "@/components/crm/lead-status-path";
 import { useRecordView } from "@/components/crm/list-view-control";
 import { useBreadcrumbLabel } from "@/components/layout/breadcrumb";
 import { formatPhoneWithCountryCode } from "@/lib/phone-display";
+import { isValidTelephonyNumber } from "@/lib/telephony-navigation";
 import { sortFollowUpsByStatus } from "@/lib/follow-up-order";
 import { selectLeadPageLayout } from "@/lib/lead-profile-layout";
 import {
@@ -342,7 +343,7 @@ export default function LeadDetailPage() {
   const params = useParams();
   useRecordView("LEAD", typeof params.id === "string" ? params.id : "");
   const router = useRouter();
-  const { profile, isLoading: authLoading, hasPermission, hasEffectivePermission, isAdmin, isSuperAdmin, getLeadStatusLabel } = useAuth();
+  const { user, tenant, profile, isLoading: authLoading, hasPermission, hasEffectivePermission, isAdmin, isSuperAdmin, getLeadStatusLabel } = useAuth();
   const telephonyActive = useTelephonyActive();
   const telephonyReasonCode = useTelephonyReasonCode();
   useTelephonyNumberMasking();
@@ -442,6 +443,7 @@ export default function LeadDetailPage() {
   const [callDetails, setCallDetails] = React.useState<any[]>([]);
   const [callDetailsLoading, setCallDetailsLoading] = React.useState(false);
   const [callDetailsError, setCallDetailsError] = React.useState<string | null>(null);
+  const [dialpadRefresh, setDialpadRefresh] = React.useState(0);
   const [showAllSiteVisits, setShowAllSiteVisits] = React.useState(false);
   const [showAllCallDetails, setShowAllCallDetails] = React.useState(false);
   const [showAllFeedbacks, setShowAllFeedbacks] = React.useState(false);
@@ -602,7 +604,12 @@ export default function LeadDetailPage() {
       }
       setEnquiries(response.data.data || []);
     } catch (error: any) {
-      setEnquiriesError(error?.response?.data?.error || error?.message || "Failed to load enquiries.");
+      const message = error?.response?.data?.error || error?.message || "Failed to load enquiries.";
+      setEnquiriesError(
+        error?.response?.status === 403 || message.includes("Insufficient permissions for Enquiry:read")
+          ? "PERMISSION_DENIED"
+          : message,
+      );
     } finally {
       setEnquiriesLoading(false);
     }
@@ -635,6 +642,7 @@ export default function LeadDetailPage() {
       const detail = (event as CustomEvent<{ leadId?: string }>).detail;
       if (detail?.leadId !== leadId) return;
       void fetchCallDetails();
+      setDialpadRefresh((value) => value + 1);
       void leadApi.get(leadId).then((response) => {
         if (response.data.success && response.data.data) {
           setLead((current) => current ? { ...current, ...response.data.data } : response.data.data);
@@ -1810,7 +1818,16 @@ export default function LeadDetailPage() {
   }
 
   const leadDisplayName = `${lead.firstName ? lead.firstName + " " : ""}${lead.lastName}`;
-  const canCall = hasEffectivePermission("TELEPHONY_CALL") && telephonyActive;
+  const isImpersonating = Boolean(user?.impersonatedBy || impersonationMeta());
+  const hasTelephonyPermission = hasEffectivePermission("TELEPHONY_CALL");
+  const canCall = hasTelephonyPermission && telephonyActive && !isImpersonating;
+  const getPhoneReasonCode = (phone: string | null | undefined, countryCode?: string | null) => {
+    if (isImpersonating) return "IMPERSONATING";
+    if (telephonyReasonCode === "PERMISSION_UNAVAILABLE") return telephonyReasonCode;
+    if (!hasTelephonyPermission) return "NO_PERMISSION";
+    if (!telephonyActive) return telephonyReasonCode;
+    return isValidTelephonyNumber(phone, countryCode) ? telephonyReasonCode : "INVALID_PHONE";
+  };
   const placeCall = async (phoneField: ClickToCallField) => {
     if (callingField) return;
     setCallingField(phoneField);
@@ -1899,40 +1916,40 @@ export default function LeadDetailPage() {
               <div className="mt-3 grid grid-cols-2 gap-x-5 gap-y-2 sm:grid-cols-3 xl:grid-cols-4">
                 <div className="min-w-0">
                   <p className="text-[10px] leading-4 text-slate-500">Phone</p>
-                  {canCall && (lead.phone || lead.mobile) ? (
+                  {canCall && isValidTelephonyNumber(lead.phone || lead.mobile, lead.countryCode) ? (
                     <button type="button" className="truncate text-left text-[12px] font-medium leading-4 text-[#1479a8] hover:underline disabled:opacity-60" disabled={Boolean(callingField)} onClick={() => void placeCall(lead.phone ? "phone" : "mobile")}>
                       {callingField === (lead.phone ? "phone" : "mobile") ? "Calling..." : maskTelephonyNumber(lead.phone || lead.mobile, lead.countryCode)}
                     </button>
                   ) : (
                     <p className="flex items-center gap-1 truncate text-[12px] font-medium leading-4 text-slate-800">
                       {maskTelephonyNumber(lead.phone || lead.mobile, lead.countryCode) || "—"}
-                      {(lead.phone || lead.mobile) ? <TelephonyStatusHint reasonCode={telephonyReasonCode} isAdmin={Boolean(isAdmin || isSuperAdmin)} /> : null}
+                      {(lead.phone || lead.mobile) ? <TelephonyStatusHint reasonCode={getPhoneReasonCode(lead.phone || lead.mobile, lead.countryCode)} isAdmin={Boolean(isAdmin || isSuperAdmin)} leadId={lead.id} tenantId={isSuperAdmin ? tenant?.id : undefined} /> : null}
                     </p>
                   )}
                 </div>
                 <div className="min-w-0">
                   <p className="text-[10px] leading-4 text-slate-500">Mobile</p>
-                  {canCall && lead.mobile ? (
+                  {canCall && isValidTelephonyNumber(lead.mobile, lead.countryCode) ? (
                     <button type="button" className="truncate text-left text-[12px] font-medium leading-4 text-[#1479a8] hover:underline disabled:opacity-60" disabled={Boolean(callingField)} onClick={() => void placeCall("mobile")}>
                       {callingField === "mobile" ? "Calling..." : maskTelephonyNumber(lead.mobile, lead.countryCode)}
                     </button>
                   ) : (
                     <p className="flex items-center gap-1 truncate text-[12px] font-medium leading-4 text-slate-800">
                       {maskTelephonyNumber(lead.mobile, lead.countryCode) || "—"}
-                      {lead.mobile ? <TelephonyStatusHint reasonCode={telephonyReasonCode} isAdmin={Boolean(isAdmin || isSuperAdmin)} /> : null}
+                      {lead.mobile ? <TelephonyStatusHint reasonCode={getPhoneReasonCode(lead.mobile, lead.countryCode)} isAdmin={Boolean(isAdmin || isSuperAdmin)} leadId={lead.id} tenantId={isSuperAdmin ? tenant?.id : undefined} /> : null}
                     </p>
                   )}
                 </div>
                 <div className="min-w-0">
                   <p className="text-[10px] leading-4 text-slate-500">Secondary Phone</p>
-                  {canCall && lead.secondaryPhone ? (
+                  {canCall && isValidTelephonyNumber(lead.secondaryPhone, lead.secondaryCountryCode || lead.countryCode) ? (
                     <button type="button" className="truncate text-left text-[12px] font-medium leading-4 text-[#1479a8] hover:underline disabled:opacity-60" disabled={Boolean(callingField)} onClick={() => void placeCall("secondaryPhone")}>
                       {callingField === "secondaryPhone" ? "Calling..." : maskTelephonyNumber(lead.secondaryPhone, lead.secondaryCountryCode || lead.countryCode)}
                     </button>
                   ) : (
                     <p className="flex items-center gap-1 truncate text-[12px] font-medium leading-4 text-slate-800">
                       {maskTelephonyNumber(lead.secondaryPhone, lead.secondaryCountryCode || lead.countryCode) || "—"}
-                      {lead.secondaryPhone ? <TelephonyStatusHint reasonCode={telephonyReasonCode} isAdmin={Boolean(isAdmin || isSuperAdmin)} /> : null}
+                      {lead.secondaryPhone ? <TelephonyStatusHint reasonCode={getPhoneReasonCode(lead.secondaryPhone, lead.secondaryCountryCode || lead.countryCode)} isAdmin={Boolean(isAdmin || isSuperAdmin)} leadId={lead.id} tenantId={isSuperAdmin ? tenant?.id : undefined} /> : null}
                     </p>
                   )}
                 </div>
@@ -2105,7 +2122,16 @@ export default function LeadDetailPage() {
                 <p className="py-8 text-center text-sm text-muted-foreground">Loading enquiries...</p>
               ) : enquiriesError ? (
                 <div role="alert" className="m-4 rounded-md border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
-                  {enquiriesError}
+                  {enquiriesError === "PERMISSION_DENIED" ? (
+                    <>
+                      <p>You do not have permission to view enquiries. Ask an administrator to grant Enquiry read access.</p>
+                      {isAdmin ? (
+                        <Link className="mt-2 inline-block font-medium underline" href="/setup/security/profiles">
+                          Review profile permissions
+                        </Link>
+                      ) : null}
+                    </>
+                  ) : enquiriesError}
                 </div>
               ) : enquiries.length > 0 ? (
                 <>
@@ -2219,6 +2245,13 @@ export default function LeadDetailPage() {
                   canEditLayout={canEditLeadLayout}
                   onSaveLayout={saveLeadLayout}
                   onCallPhone={canCall ? (fieldName) => { void placeCall(fieldName); } : undefined}
+                  getPhoneUnavailableReason={(fieldName, phone) => getPhoneReasonCode(
+                    phone,
+                    fieldName === "secondaryPhone" ? lead.secondaryCountryCode || lead.countryCode : lead.countryCode,
+                  )}
+                  isTelephonyAdmin={Boolean(isAdmin || isSuperAdmin)}
+                  telephonyLeadId={lead.id}
+                  telephonyTenantId={isSuperAdmin ? tenant?.id : undefined}
                   callingPhoneField={callingField}
                 />
               )}
@@ -2272,7 +2305,7 @@ export default function LeadDetailPage() {
               <StickyNotesCard key={`${lead.id}-${stickyNotesRefresh}`} recordId={lead.id} canAdd={canEditLead} />
               <LeadActivityHistoryCard
                 leadId={lead.id}
-                refreshKey={`${lead.updatedAt}:${lead.activities?.length ?? 0}:${lead.tasks?.length ?? 0}:${lead.followUps?.length ?? 0}:${lead.siteVisits?.length ?? 0}:${stickyNotesRefresh}`}
+                refreshKey={`${lead.updatedAt}:${lead.activities?.length ?? 0}:${lead.tasks?.length ?? 0}:${lead.followUps?.length ?? 0}:${lead.siteVisits?.length ?? 0}:${stickyNotesRefresh}:${dialpadRefresh}`}
                 canViewAuditHistory={showAuditHistory}
               />
             </aside>

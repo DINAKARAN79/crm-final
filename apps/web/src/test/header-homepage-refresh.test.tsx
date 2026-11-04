@@ -86,6 +86,23 @@ describe('Header admin home refresh', () => {
     });
   });
 
+  it('shows an inline message for a profile permission denial without logging an error', async () => {
+    profileApiMock.list.mockRejectedValue({ response: { status: 403 } });
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { getByRole, findByText } = render(<Header onMenuClick={() => undefined} />);
+
+    await waitFor(() => {
+      expect(profileApiMock.list).toHaveBeenCalled();
+    });
+    const adminHomeTrigger = getByRole('button', { name: /Admin Home/i });
+    adminHomeTrigger.focus();
+    fireEvent.keyDown(adminHomeTrigger, { key: 'Enter' });
+
+    expect(await findByText('You do not have permission to view profiles')).toBeTruthy();
+    expect(consoleError).not.toHaveBeenCalled();
+    consoleError.mockRestore();
+  });
+
   it('does not show a custom homepages label for a selected homepage', async () => {
     searchState.value = 'homepage=homepage-1';
     const { getByRole } = render(<Header onMenuClick={() => undefined} />);

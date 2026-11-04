@@ -5,9 +5,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const placed = vi.hoisted(() => vi.fn());
 const dialpadMocks = vi.hoisted(() => ({
+  isImpersonating: false,
   hasPermission: vi.fn().mockResolvedValue(true),
   permissionConfigured: vi.fn().mockResolvedValue(true),
   findLead: vi.fn(),
+  findFollowUp: vi.fn(),
   findCall: vi.fn(),
   updateCall: vi.fn(),
   createCall: vi.fn(),
@@ -23,6 +25,7 @@ vi.mock('../middleware/auth', () => ({
     Object.assign(req, {
       user: { id: 'cmup3jc0m007ir1pnj1ic1a9u', tenantId: 'cmup3jbyv0000r1pndvbpn4my', isSuperAdmin: false, isAdmin: false },
       tenantId: 'cmup3jbyv0000r1pndvbpn4my',
+      impersonation: dialpadMocks.isImpersonating ? {} : undefined,
     });
     next();
   },
@@ -37,6 +40,7 @@ vi.mock('@dct-crm/db', () => ({
   prisma: {
     telephonySetting: { findUnique: dialpadMocks.settingsFindUnique },
     lead: { findFirst: dialpadMocks.findLead },
+    followUp: { findFirst: dialpadMocks.findFollowUp },
     callDetail: { findFirst: dialpadMocks.findCall, update: dialpadMocks.updateCall, create: dialpadMocks.createCall },
     auditLog: { create: dialpadMocks.createAudit },
     $transaction: dialpadMocks.transaction,
@@ -96,7 +100,9 @@ async function post(body: Record<string, unknown>) {
 
 afterEach(async () => {
   placed.mockReset();
+  dialpadMocks.isImpersonating = false;
   dialpadMocks.findLead.mockReset();
+  dialpadMocks.findFollowUp.mockReset();
   dialpadMocks.findCall.mockReset();
   dialpadMocks.updateCall.mockReset();
   dialpadMocks.createCall.mockReset();
@@ -110,6 +116,130 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve, reject) => {
     server.close((error) => error ? reject(error) : resolve());
   })));
+});
+
+describe('POST /api/telephony/dialpad-call-started', () => {
+  const configureStartTransaction = () => {
+    dialpadMocks.createCall.mockResolvedValue({ id: 'dialpad-call-1' });
+    dialpadMocks.createAudit.mockResolvedValue({});
+    dialpadMocks.transaction.mockImplementation((callback) => callback({
+      callDetail: { create: dialpadMocks.createCall },
+      auditLog: { create: dialpadMocks.createAudit },
+    }));
+  };
+
+  it('authorizes and records a lead call using only the authenticated tenant and user', async () => {
+    dialpadMocks.settingsFindUnique.mockResolvedValue({
+      isActive: true,
+      encryptedCredentials: 'cipher',
+      callMethod: 'DIALPAD_MESSAGE',
+      duplicateGuardSeconds: 10,
+      callsPerMinute: 10,
+      blockDnc: false,
+      dncNumbers: '',
+    });
+    dialpadMocks.findLead.mockResolvedValue({
+      id: 'lead-dialpad-1',
+      tenantId: 'cmup3jbyv0000r1pndvbpn4my',
+      ownerId: null,
+      creatorId: 'cmup3jc0m007ir1pnj1ic1a9u',
+      firstName: 'Test',
+      lastName: 'Lead',
+      company: null,
+      phone: '+12125550123',
+      mobile: null,
+      secondaryPhone: null,
+      countryCode: null,
+      secondaryCountryCode: null,
+      leadNumber: 'L-1',
+    });
+    dialpadMocks.findCall.mockResolvedValue(null);
+    dialpadMocks.findFollowUp.mockResolvedValue({ id: 'followup-1' });
+    configureStartTransaction();
+
+    const response = await postTo('dialpad-call-started', {
+      leadId: 'lead-dialpad-1',
+      phoneField: 'phone',
+      taskId: 'followup-1',
+      tenantId: 'spoof-tenant',
+      userId: 'spoof-user',
+    });
+
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      data: {
+        callDetailId: 'dialpad-call-1',
+        normalizedNumber: '+12125550123',
+        leadName: 'Test Lead',
+        recordId: 'lead-dialpad-1',
+        taskId: 'followup-1',
+        tenantId: 'cmup3jbyv0000r1pndvbpn4my',
+        allowed: true,
+      },
+    });
+    expect(dialpadMocks.findLead).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'lead-dialpad-1', tenantId: 'cmup3jbyv0000r1pndvbpn4my' },
+    }));
+    expect(dialpadMocks.findFollowUp).toHaveBeenCalledWith({
+      where: { id: 'followup-1', tenantId: 'cmup3jbyv0000r1pndvbpn4my', leadId: 'lead-dialpad-1' },
+      select: { id: true },
+    });
+    expect(dialpadMocks.createCall).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        tenantId: 'cmup3jbyv0000r1pndvbpn4my',
+        createdById: 'cmup3jc0m007ir1pnj1ic1a9u',
+        leadId: 'lead-dialpad-1',
+        callTo: '+12125550123',
+        status: 'Initiated',
+      }),
+    }));
+  });
+
+  it('refuses DNC calls before creating a CallDetail', async () => {
+    dialpadMocks.settingsFindUnique.mockResolvedValue({
+      isActive: true,
+      encryptedCredentials: 'cipher',
+      callMethod: 'DIALPAD_MESSAGE',
+      duplicateGuardSeconds: 10,
+      callsPerMinute: 10,
+      blockDnc: true,
+      dncNumbers: '+12125550124',
+    });
+    dialpadMocks.findLead.mockResolvedValue({
+      id: 'lead-dialpad-dnc',
+      tenantId: 'cmup3jbyv0000r1pndvbpn4my',
+      ownerId: null,
+      creatorId: 'cmup3jc0m007ir1pnj1ic1a9u',
+      phone: '+12125550124',
+      countryCode: null,
+    });
+
+    const response = await postTo('dialpad-call-started', {
+      leadId: 'lead-dialpad-dnc',
+      phoneField: 'phone',
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: 'DO_NOT_CALL' });
+    expect(dialpadMocks.transaction).not.toHaveBeenCalled();
+    expect(dialpadMocks.createCall).not.toHaveBeenCalled();
+  });
+
+  it('refuses calls during impersonation before checking permissions or touching call data', async () => {
+    dialpadMocks.isImpersonating = true;
+
+    const response = await postTo('dialpad-call-started', {
+      leadId: 'lead-impersonated',
+      phoneField: 'phone',
+    });
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ code: 'IMPERSONATION_DISABLED' });
+    expect(dialpadMocks.hasPermission).not.toHaveBeenCalled();
+    expect(dialpadMocks.findLead).not.toHaveBeenCalled();
+    expect(dialpadMocks.transaction).not.toHaveBeenCalled();
+  });
 });
 
 describe('GET /api/telephony/client-config', () => {
@@ -471,6 +601,28 @@ describe('POST /api/telephony/dialpad-event', () => {
     expect(response.status).toBe(200);
     expect(dialpadMocks.updateCall).not.toHaveBeenCalled();
     expect(dialpadMocks.createAudit).not.toHaveBeenCalled();
+  });
+
+  it('does not fall back to another open call when a supplied UUID does not match', async () => {
+    dialpadMocks.findLead.mockResolvedValue({
+      id: 'lead-1',
+      tenantId: 'cmup3jbyv0000r1pndvbpn4my',
+      ownerId: null,
+      creatorId: 'cmup3jc0m007ir1pnj1ic1a9u',
+    });
+    dialpadMocks.findCall.mockResolvedValue(null);
+    configureTransaction();
+
+    const response = await postTo('dialpad-event', {
+      event: 'BIZCALL_CALL_CONNECTED',
+      leadId: 'lead-1',
+      number: '+12125550123',
+      callUuid: 'unknown-provider-uuid',
+    });
+
+    expect(response.status).toBe(404);
+    expect(dialpadMocks.findCall).toHaveBeenCalledTimes(1);
+    expect(dialpadMocks.updateCall).not.toHaveBeenCalled();
   });
 
   it('saves disposition notes once without copying raw notes into audit values', async () => {

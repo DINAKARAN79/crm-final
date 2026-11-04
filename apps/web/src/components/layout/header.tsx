@@ -48,16 +48,19 @@ export function Header({ onMenuClick }: HeaderProps) {
   const [userMenuOpen, setUserMenuOpen] = React.useState(false);
   const [userDetailsOpen, setUserDetailsOpen] = React.useState(false);
   const [adminProfiles, setAdminProfiles] = React.useState<AdminHomeProfile[]>([]);
+  const [profilesAccessDenied, setProfilesAccessDenied] = React.useState(false);
   const dropdownRefreshId = React.useRef(0);
 
   const refreshAdminDropdownData = React.useCallback(() => {
     if (!isAuthenticated || !isAdmin || isSuperAdmin) {
       dropdownRefreshId.current += 1;
       setAdminProfiles([]);
+      setProfilesAccessDenied(false);
       return;
     }
 
     const refreshId = ++dropdownRefreshId.current;
+    setProfilesAccessDenied(false);
     profileApi.list({ limit: 100 })
       .then((profilesResponse) => {
         const profileItems = responseItems(profilesResponse) as Array<{ id?: string; name?: string }>;
@@ -74,6 +77,13 @@ export function Header({ onMenuClick }: HeaderProps) {
         }
       })
       .catch((error) => {
+        if (error?.response?.status === 403) {
+          if (refreshId === dropdownRefreshId.current) {
+            setAdminProfiles([]);
+            setProfilesAccessDenied(true);
+          }
+          return;
+        }
         console.error("Failed to load admin profiles:", error);
       });
   }, [isAdmin, isAuthenticated, isSuperAdmin]);
@@ -153,6 +163,11 @@ export function Header({ onMenuClick }: HeaderProps) {
                       </DropdownMenuItem>
                     ))}
                   </>
+                )}
+                {profilesAccessDenied && (
+                  <p role="status" className="px-2 py-2 text-sm text-muted-foreground">
+                    You do not have permission to view profiles
+                  </p>
                 )}
               </DropdownMenuContent>
             </DropdownMenu>

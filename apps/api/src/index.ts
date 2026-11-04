@@ -76,6 +76,7 @@ import { normalizeOverdueScheduledItems } from './services/leadWorkflowExtras';
 import { startSiteVisitMissedScheduler } from './services/siteVisitMissedJob';
 import { assertApiKeyEncryptionConfigured } from './services/apiKeys';
 import superAdminReportingRouter from './routes/superAdminReporting';
+import { warnForMissingRequiredPermissions } from './services/requiredPermissionCatalog';
 
 export const createApp = () => {
   installImpersonationAuditStamp();
@@ -215,6 +216,9 @@ if (require.main === module) {
     throw error;
   }
   const PORT = process.env.PORT || 3001;
+  void warnForMissingRequiredPermissions().catch((error) => {
+    console.error('Permission catalog self-check failed:', error);
+  });
   const normalizeOverdueItems = () => {
     void normalizeOverdueScheduledItems().catch((error) => {
       console.error('Normalize overdue scheduled items error:', error);

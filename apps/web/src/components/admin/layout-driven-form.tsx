@@ -25,6 +25,8 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
+import { TelephonyStatusHint } from "@/components/crm/telephony-status-hint";
+import { isValidTelephonyNumber } from "@/lib/telephony-navigation";
 import { GripVertical, Pencil, Save, X } from "lucide-react";
 
 interface LayoutSection {
@@ -72,6 +74,10 @@ interface LayoutDrivenFormProps {
   canEditLayout?: boolean;
   onSaveLayout?: (sections: LayoutSection[]) => Promise<void>;
   onCallPhone?: (fieldName: "phone" | "mobile" | "secondaryPhone") => void;
+  getPhoneUnavailableReason?: (fieldName: "phone" | "mobile" | "secondaryPhone", phone: string) => string;
+  isTelephonyAdmin?: boolean;
+  telephonyLeadId?: string;
+  telephonyTenantId?: string;
   callingPhoneField?: string | null;
 }
 
@@ -91,6 +97,10 @@ export default function LayoutDrivenForm({
   canEditLayout = false,
   onSaveLayout,
   onCallPhone,
+  getPhoneUnavailableReason,
+  isTelephonyAdmin = false,
+  telephonyLeadId,
+  telephonyTenantId,
   callingPhoneField = null,
 }: LayoutDrivenFormProps) {
   const { leadStatuses, getLeadStatusLabel } = useAuth();
@@ -584,7 +594,16 @@ export default function LayoutDrivenForm({
                     {...dropProvided.droppableProps}
                     className={`${isEditingLayout ? "grid grid-cols-1 gap-x-8" : section.columns === 1 ? "crm-form-grid crm-form-grid-1" : "crm-form-grid"} ${snapshot.isDraggingOver ? "rounded-md bg-sky-50/70" : ""}`}
                   >
-                    {visibleFields.map((field, fieldIdx) => (
+                    {visibleFields.map((field, fieldIdx) => {
+                      const phoneFieldName = field.name === "phone" || field.name === "mobile" || field.name === "secondaryPhone"
+                        ? field.name
+                        : null;
+                      const phoneCountryCode = field.name === "secondaryPhone"
+                        ? data.secondaryCountryCode || data.countryCode
+                        : data.countryCode;
+                      const phoneValue = phoneFieldName ? data[field.name] : null;
+                      const phoneIsValid = isValidTelephonyNumber(phoneValue, phoneCountryCode);
+                      return (
                       <Draggable
                         key={field.name}
                         draggableId={`lead-layout-${field.name}`}
@@ -621,15 +640,27 @@ export default function LayoutDrivenForm({
                             <a className="text-primary hover:underline" href={`mailto:${String(data[field.name])}`}>
                               {displayValue(field, data[field.name])}
                             </a>
-                          ) : onCallPhone && objectName === "Lead" && (field.name === "phone" || field.name === "mobile" || field.name === "secondaryPhone") && data[field.name] ? (
+                          ) : phoneFieldName && objectName === "Lead" && phoneValue ? (
+                            onCallPhone && phoneIsValid ? (
                             <button
                               type="button"
                               className="text-left text-[#1479a8] hover:underline disabled:opacity-60"
                               disabled={Boolean(callingPhoneField)}
-                              onClick={() => onCallPhone(field.name as "phone" | "mobile" | "secondaryPhone")}
+                              onClick={() => onCallPhone(phoneFieldName)}
                             >
                               {callingPhoneField === field.name ? "Calling..." : displayValue(field, data[field.name])}
                             </button>
+                            ) : (
+                              <span className="inline-flex items-center gap-1">
+                                {displayValue(field, data[field.name])}
+                                <TelephonyStatusHint
+                                  reasonCode={getPhoneUnavailableReason?.(phoneFieldName, phoneValue) || "NOT_CONFIGURED"}
+                                  isAdmin={isTelephonyAdmin}
+                                  leadId={telephonyLeadId}
+                                  tenantId={telephonyTenantId}
+                                />
+                              </span>
+                            )
                           ) : (
                             displayValue(
                               field,
@@ -688,7 +719,8 @@ export default function LayoutDrivenForm({
                   </div>
                         )}
                       </Draggable>
-                    ))}
+                      );
+                    })}
                     {dropProvided.placeholder}
                   </div>
                 )}

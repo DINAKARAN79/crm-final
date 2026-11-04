@@ -74,6 +74,16 @@ describe("Bizcall dialpad browser helpers", () => {
     expect(result.searchParams.get("theme")).toBe("light");
   });
 
+  it("uses the configured number query only for dialpad prefill", () => {
+    const result = new URL(buildBizcallDialpadUrl(
+      "https://bizcall.cxteletech.com/embed/dialpad",
+      "crm-user-7",
+      "CRM",
+      "+14155552671",
+    ));
+    expect(result.searchParams.get("number")).toBe("+14155552671");
+  });
+
   it("rejects messages from other origins or other windows", () => {
     const dialpadWindow = {};
     expect(isTrustedBizcallMessage("https://bizcall.cxteletech.com", dialpadWindow, "https://bizcall.cxteletech.com", dialpadWindow)).toBe(true);

@@ -57,10 +57,11 @@ export function claimDialpadLock(storage: StorageLike, key: string, ownerId: str
   }
 }
 
-export function buildBizcallDialpadUrl(url: string, userId: string, theme: "CRM" | "LIGHT" | "DARK") {
+export function buildBizcallDialpadUrl(url: string, userId: string, theme: "CRM" | "LIGHT" | "DARK", number?: string) {
   const dialpadUrl = new URL(url);
   dialpadUrl.searchParams.set("userId", userId);
   dialpadUrl.searchParams.set("theme", theme.toLowerCase() === "crm" ? "light" : theme.toLowerCase());
+  if (number) dialpadUrl.searchParams.set("number", number);
   return dialpadUrl.toString();
 }
 
@@ -69,10 +70,11 @@ export function openBizcallDialpad(
   userId: string,
   tenantId: string,
   theme: "CRM" | "LIGHT" | "DARK",
-  openWindow: (url: string, target: string) => unknown,
+  openWindow: (url: string, target: string) => WindowProxy | null,
+  number?: string,
 ) {
   const targetName = `${BIZCALL_DIALPAD_WINDOW_NAME}-${encodeURIComponent(tenantId)}-${encodeURIComponent(userId)}`;
-  return openWindow(buildBizcallDialpadUrl(url, userId, theme), targetName);
+  return openWindow(buildBizcallDialpadUrl(url, userId, theme, number), targetName);
 }
 
 export function maskDialpadNumber(value: unknown): string {

@@ -34,6 +34,7 @@ export const telephonySettingsSchema = z.object({
   callsPerMinute: z.number().int().min(1).max(60).default(10),
   maskNumbers: z.boolean().default(false),
   sendTenantIdInDial: z.boolean().default(true),
+  autoDialOnClick: z.boolean().default(true),
   blockDnc: z.boolean().default(false),
   dncNumbers: z.string().max(100_000).default(''),
   authToken: z.string().max(2000).optional(),
@@ -41,10 +42,7 @@ export const telephonySettingsSchema = z.object({
     name: z.string().trim().max(64).default(''),
     value: z.string().max(2000).optional(),
   })).max(3).optional(),
-}).refine(
-  (settings) => settings.dialpadMode !== 'NEW_TAB' || settings.callMethod !== 'DIALPAD_MESSAGE',
-  { message: 'Dialpad message mode requires the docked panel.' },
-);
+});
 
 export type ExtraHeaderPublic = { name: string; hasValue: boolean };
 export type TelephonyStatus = 'not_configured' | 'active' | 'inactive';
@@ -74,6 +72,7 @@ export type PublicTelephonySettings = {
   callsPerMinute: number;
   maskNumbers: boolean;
   sendTenantIdInDial: boolean;
+  autoDialOnClick: boolean;
   blockDnc: boolean;
   dncNumbers: string;
 };
@@ -136,6 +135,7 @@ export function publicTelephonySettings(row: {
   callsPerMinute?: number;
   maskNumbers?: boolean;
   sendTenantIdInDial?: boolean;
+  autoDialOnClick?: boolean;
   blockDnc?: boolean;
   dncNumbers?: string;
 } | null): PublicTelephonySettings {
@@ -165,6 +165,7 @@ export function publicTelephonySettings(row: {
       callsPerMinute: 10,
       maskNumbers: false,
       sendTenantIdInDial: true,
+      autoDialOnClick: true,
       blockDnc: false,
       dncNumbers: '',
     };
@@ -210,6 +211,7 @@ export function publicTelephonySettings(row: {
     callsPerMinute: row.callsPerMinute ?? 10,
     maskNumbers: row.maskNumbers ?? false,
     sendTenantIdInDial: row.sendTenantIdInDial ?? true,
+    autoDialOnClick: row.autoDialOnClick ?? true,
     blockDnc: row.blockDnc ?? false,
     dncNumbers: row.dncNumbers || '',
   };
@@ -310,6 +312,7 @@ export async function saveTelephonySettings(
       callsPerMinute: input.callsPerMinute,
       maskNumbers: input.maskNumbers,
       sendTenantIdInDial: input.sendTenantIdInDial,
+      autoDialOnClick: input.autoDialOnClick,
       blockDnc: input.blockDnc,
       dncNumbers: dncNumbers.join('\n'),
     },
@@ -336,6 +339,7 @@ export async function saveTelephonySettings(
       callsPerMinute: input.callsPerMinute,
       maskNumbers: input.maskNumbers,
       sendTenantIdInDial: input.sendTenantIdInDial,
+      autoDialOnClick: input.autoDialOnClick,
       blockDnc: input.blockDnc,
       dncNumbers: dncNumbers.join('\n'),
     },
@@ -364,6 +368,7 @@ export async function saveTelephonySettings(
     callsPerMinute: settings.callsPerMinute,
     maskNumbers: settings.maskNumbers,
     sendTenantIdInDial: settings.sendTenantIdInDial,
+    autoDialOnClick: settings.autoDialOnClick,
     blockDnc: settings.blockDnc,
     dncCount,
     dncNumbersChanged: dncChanged,
@@ -387,6 +392,7 @@ export async function saveTelephonySettings(
     callsPerMinute: existing.callsPerMinute,
     maskNumbers: existing.maskNumbers,
     sendTenantIdInDial: existing.sendTenantIdInDial,
+    autoDialOnClick: existing.autoDialOnClick,
     blockDnc: existing.blockDnc,
     dncCount: existing.dncNumbers.split(/[\s,;]+/).filter(Boolean).length,
     dncNumbersChanged: false,

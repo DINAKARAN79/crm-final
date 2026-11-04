@@ -3,17 +3,18 @@ import { spawnSync } from "node:child_process";
 const scriptByCommand = {
   check: "scripts/check-telephony-permission.sql",
   repair: "scripts/repair-telephony-permission.sql",
+  "check-admin-permissions": "scripts/check-admin-permissions.sql",
 };
 
 const command = process.argv[2];
-if (command !== "check" && command !== "repair") {
-  console.error("Choose either 'check' or 'repair'.");
+if (!Object.hasOwn(scriptByCommand, command)) {
+  console.error("Choose 'check', 'repair', or 'check-admin-permissions'.");
   process.exit(2);
 }
 const script = scriptByCommand[command];
 
 if (!process.env.DATABASE_URL) {
-  console.error("DATABASE_URL is required for the telephony database command.");
+  console.error("DATABASE_URL is required for this database check or repair command.");
   process.exit(2);
 }
 

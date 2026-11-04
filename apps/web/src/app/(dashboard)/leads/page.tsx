@@ -6,10 +6,11 @@ import { useAuth } from "@/contexts/auth-context";
 
 import { useRouter } from "next/navigation";
 
-import { leadApi } from "@/lib/api";
+import { impersonationMeta, leadApi } from "@/lib/api";
 import { clickToCallToast } from "@/lib/click-to-call";
 import { requestLeadCall } from "@/lib/telephony-client";
 import { maskTelephonyNumber, useTelephonyActive, useTelephonyNumberMasking, useTelephonyReasonCode } from "@/lib/telephony-client";
+import { isValidTelephonyNumber } from "@/lib/telephony-navigation";
 import { useToast } from "@/hooks/use-toast";
 import { ToastAction } from "@/components/ui/toast";
 
@@ -43,6 +44,8 @@ function mapApiLeadToLead(apiLead: any, maskNumbers: boolean): Lead {
     company: apiLead.company || "",
     email: apiLead.email || "",
     phone: maskNumbers ? maskTelephonyNumber(apiLead.phone, apiLead.countryCode) : apiLead.phone || "",
+    countryCode: apiLead.countryCode || null,
+    phoneIsValid: isValidTelephonyNumber(apiLead.phone, apiLead.countryCode),
     source: apiLead.source || "",
     status: statusLower,
     statusLabel: apiLead.statusLabel || statusLower.replaceAll("_", " "),
@@ -58,7 +61,7 @@ function mapApiLeadToLead(apiLead: any, maskNumbers: boolean): Lead {
 }
 
 export default function LeadsPage() {
-  const { leadStatuses, hasPermission, hasEffectivePermission, isAdmin, isSuperAdmin } = useAuth();
+  const { leadStatuses, hasPermission, hasEffectivePermission, isAdmin, isSuperAdmin, user, tenant } = useAuth();
   const { toast } = useToast();
   const router = useRouter();
   const listViews = useListView("LEAD");
@@ -89,7 +92,7 @@ export default function LeadsPage() {
 
   const canCreateLead = React.useMemo(() => hasPermission("Lead", "create"), [hasPermission]);
   const canDeleteLead = React.useMemo(() => hasPermission("Lead", "delete"), [hasPermission]);
-  const canCall = hasEffectivePermission("TELEPHONY_CALL") && telephonyActive;
+  const canCall = hasEffectivePermission("TELEPHONY_CALL") && telephonyActive && !Boolean(user?.impersonatedBy || impersonationMeta());
   const [callingLeadId, setCallingLeadId] = React.useState<string | null>(null);
 
   const callLead = async (lead: Lead) => {
@@ -262,6 +265,7 @@ export default function LeadsPage() {
         canCall={canCall}
         telephonyReasonCode={telephonyReasonCode}
         isAdmin={Boolean(isAdmin || isSuperAdmin)}
+        tenantId={isSuperAdmin ? tenant?.id : undefined}
         callingLeadId={callingLeadId}
         onCall={(lead) => { void callLead(lead); }}
         sorting={listViews.sorting ? [listViews.sorting] : []}

@@ -732,7 +732,7 @@ export const clickToCallApi = {
     api.post<ApiResponse>('/api/telephony/click-to-call', data),
   clientConfig: () =>
     api.get<ApiResponse>('/api/telephony/client-config'),
-  dialpadCallStarted: (data: { leadId: string; phoneField: 'phone' | 'mobile' | 'secondaryPhone' } | { number: string }) =>
+  dialpadCallStarted: (data: { leadId: string; phoneField: 'phone' | 'mobile' | 'secondaryPhone'; taskId?: string } | { number: string }) =>
     api.post<ApiResponse>('/api/telephony/dialpad-call-started', data),
   dialpadEvent: (data: {
     event: 'BIZCALL_AGENT_REGISTERED' | 'BIZCALL_CALL_STARTING' | 'BIZCALL_CALL_CONNECTED' | 'BIZCALL_CALL_ENDED' | 'BIZCALL_DISPOSITION_SUBMITTED';

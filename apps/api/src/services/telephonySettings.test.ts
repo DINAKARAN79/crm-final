@@ -43,6 +43,8 @@ const existingRow = () => ({
   duplicateGuardSeconds: 10,
   callsPerMinute: 10,
   maskNumbers: false,
+  sendTenantIdInDial: true,
+  autoDialOnClick: true,
   blockDnc: false,
   dncNumbers: '',
 });
@@ -69,6 +71,11 @@ beforeEach(() => {
 });
 
 describe('saveTelephonySettings Bizcall key behavior', () => {
+  it('defaults dialpad auto-dial and tenant context on', () => {
+    expect(input()).toMatchObject({ autoDialOnClick: true, sendTenantIdInDial: true });
+    expect(publicTelephonySettings(null)).toMatchObject({ autoDialOnClick: true, sendTenantIdInDial: true });
+  });
+
   it('does not return an api_key query parameter from legacy settings', () => {
     const settings = publicTelephonySettings({
       ...existingRow(),
@@ -126,13 +133,12 @@ describe('saveTelephonySettings Bizcall key behavior', () => {
       'admin-1',
       input({ dncNumbers: '5551234' }),
     )).rejects.toThrow(/E\.164/);
-    const invalidMode = telephonySettingsSchema.safeParse({
+    const newTabDialpad = telephonySettingsSchema.safeParse({
       clickToCallUrl: 'https://bizcall.cxteletech.com/api/integration/click2call',
       dialpadMode: 'NEW_TAB',
       callMethod: 'DIALPAD_MESSAGE',
     });
-    expect(invalidMode.success).toBe(false);
-    if (!invalidMode.success) expect(invalidMode.error.errors[0]?.message).toBe('Dialpad message mode requires the docked panel.');
+    expect(newTabDialpad.success).toBe(true);
     await saveTelephonySettings(
       'tenant-1',
       'admin-1',
@@ -145,6 +151,8 @@ describe('saveTelephonySettings Bizcall key behavior', () => {
         duplicateGuardSeconds: 20,
         callsPerMinute: 8,
         maskNumbers: true,
+        sendTenantIdInDial: false,
+        autoDialOnClick: false,
         blockDnc: true,
         dncNumbers: '+14155552671',
         productionOrigin: 'https://crm.example.com',
@@ -158,6 +166,8 @@ describe('saveTelephonySettings Bizcall key behavior', () => {
       duplicateGuardSeconds: 20,
       callsPerMinute: 8,
       maskNumbers: true,
+      sendTenantIdInDial: false,
+      autoDialOnClick: false,
       blockDnc: true,
       dncNumbers: '+14155552671',
       productionOrigin: 'https://crm.example.com',

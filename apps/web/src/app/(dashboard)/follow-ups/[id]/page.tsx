@@ -4,7 +4,9 @@ import * as React from "react";
 import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
 import { CalendarClock, CheckCircle2, Clock, History, Pencil, RotateCcw, Save, User, X } from "lucide-react";
-import { followUpApi } from "@/lib/api";
+import { followUpApi, impersonationMeta } from "@/lib/api";
+import { clickToCallToast } from "@/lib/click-to-call";
+import { requestLeadCall, useTelephonyActive, useTelephonyReasonCode } from "@/lib/telephony-client";
 import { useRecordView } from "@/components/crm/list-view-control";
 import { useAuth } from "@/contexts/auth-context";
 import { formatDateTime } from "@/lib/date-format";
@@ -16,6 +18,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
+import { TelephonyStatusHint } from "@/components/crm/telephony-status-hint";
+import { isValidTelephonyNumber } from "@/lib/telephony-navigation";
 
 interface FollowUpHistoryEntry {
   id: string;
@@ -47,8 +51,10 @@ interface FollowUpDetail {
     leadNumber?: string | null;
     firstName?: string | null;
     lastName: string;
+    company?: string | null;
     phone?: string | null;
     mobile?: string | null;
+    secondaryPhone?: string | null;
     email?: string | null;
     status: string;
     source: string;
@@ -85,7 +91,9 @@ export default function FollowUpDetailPage() {
   const searchParams = useSearchParams();
   const sourceLeadId = searchParams.get("leadId");
   const { toast } = useToast();
-  const { getLeadStatusLabel } = useAuth();
+  const { user, tenant, getLeadStatusLabel, hasEffectivePermission, isAdmin, isSuperAdmin } = useAuth();
+  const telephonyActive = useTelephonyActive();
+  const telephonyReasonCode = useTelephonyReasonCode();
   const [followUp, setFollowUp] = React.useState<FollowUpDetail | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [saving, setSaving] = React.useState(false);
@@ -94,6 +102,7 @@ export default function FollowUpDetailPage() {
   const [editDescription, setEditDescription] = React.useState("");
   const [editDate, setEditDate] = React.useState("");
   const [editTime, setEditTime] = React.useState("");
+  const [callingPhoneField, setCallingPhoneField] = React.useState<string | null>(null);
   const earliestFollowUp = new Date();
   earliestFollowUp.setSeconds(0, 0);
   earliestFollowUp.setMinutes(earliestFollowUp.getMinutes() + 1);
@@ -206,6 +215,50 @@ export default function FollowUpDetailPage() {
     } finally {
       setSaving(false);
     }
+  };
+
+  const placeFollowUpCall = async (phoneField: "phone" | "mobile" | "secondaryPhone") => {
+    const lead = followUp?.lead;
+    if (!lead || callingPhoneField) return;
+    setCallingPhoneField(phoneField);
+    const result = await requestLeadCall({
+      leadId: lead.id,
+      phoneField,
+      leadName: `${lead.firstName || ""} ${lead.lastName || ""}`.trim() || lead.company || lead.leadNumber || "Lead",
+      taskId: followUp.id,
+    });
+    const notice = clickToCallToast(result, Boolean(isAdmin || isSuperAdmin));
+    toast({ title: notice.title, description: notice.description, variant: notice.variant });
+    setCallingPhoneField(null);
+  };
+
+  const phoneValue = (phone: string | null | undefined, field: "phone" | "mobile" | "secondaryPhone") => {
+    if (!phone) return "—";
+    const impersonating = Boolean(user?.impersonatedBy || impersonationMeta());
+    const hasTelephonyPermission = hasEffectivePermission("TELEPHONY_CALL");
+    const validPhone = isValidTelephonyNumber(phone);
+    if (!hasTelephonyPermission || !telephonyActive || impersonating || !validPhone) {
+      const reasonCode = impersonating
+        ? "IMPERSONATING"
+        : telephonyReasonCode === "PERMISSION_UNAVAILABLE"
+          ? telephonyReasonCode
+          : !hasTelephonyPermission
+            ? "NO_PERMISSION"
+            : !telephonyActive
+              ? telephonyReasonCode
+              : "INVALID_PHONE";
+      return <span className="inline-flex items-center gap-1">{phone}<TelephonyStatusHint reasonCode={reasonCode} isAdmin={isAdmin || isSuperAdmin} leadId={followUp?.lead?.id} tenantId={isSuperAdmin ? tenant?.id : undefined} /></span>;
+    }
+    return (
+      <button
+        type="button"
+        className="text-left text-primary hover:underline disabled:opacity-60"
+        disabled={Boolean(callingPhoneField)}
+        onClick={() => void placeFollowUpCall(field)}
+      >
+        {callingPhoneField === field ? "Calling..." : phone}
+      </button>
+    );
   };
 
   if (loading) {
@@ -345,8 +398,9 @@ export default function FollowUpDetailPage() {
                     <DetailRow label="Status" value={getLeadStatusLabel(followUp.lead.status)} />
                   </dl>
                   <dl>
-                    <DetailRow label="Phone" value={followUp.lead.phone || "—"} />
-                    <DetailRow label="Mobile" value={followUp.lead.mobile || "—"} />
+                    <DetailRow label="Phone" value={phoneValue(followUp.lead.phone, "phone")} />
+                    <DetailRow label="Mobile" value={phoneValue(followUp.lead.mobile, "mobile")} />
+                    <DetailRow label="Secondary Phone" value={phoneValue(followUp.lead.secondaryPhone, "secondaryPhone")} />
                     <DetailRow label="Email" value={followUp.lead.email || "—"} />
                     <DetailRow label="Source" value={followUp.lead.source.replaceAll("_", " ")} />
                   </dl>

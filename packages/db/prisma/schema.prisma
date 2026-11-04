@@ -2638,6 +2638,7 @@ model TelephonySetting {
   callsPerMinute         Int      @default(10)
   maskNumbers            Boolean  @default(false)
   sendTenantIdInDial     Boolean  @default(true)
+  autoDialOnClick        Boolean  @default(true)
   blockDnc               Boolean  @default(false)
   dncNumbers             String   @default("")
   createdAt              DateTime @default(now())

@@ -28,6 +28,7 @@
     "db:studio": "npm run db:studio --workspace=packages/db",
     "db:repair-telephony": "node scripts/telephony-db-sql.mjs repair",
     "postdeploy:check-telephony": "sh scripts/check-telephony-permission.sh",
+    "postdeploy:check-permissions": "node scripts/telephony-db-sql.mjs check-admin-permissions",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },
   "devDependencies": {

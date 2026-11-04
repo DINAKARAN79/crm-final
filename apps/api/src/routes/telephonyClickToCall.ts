@@ -21,6 +21,7 @@ const requestSchema = z.object({
 const dialpadCallSchema = z.object({
   leadId: z.string().trim().min(1),
   phoneField: z.enum(['phone', 'mobile', 'secondaryPhone']).default('phone'),
+  taskId: z.string().trim().min(1).max(255).optional(),
 });
 const manualDialpadCallSchema = z.object({
   number: z.string().trim().regex(/^\+[1-9]\d{1,14}$/),
@@ -175,6 +176,7 @@ router.get('/client-config', async (req: AuthRequest, res: Response) => {
         defaultDockState: settings?.defaultDockState || 'COLLAPSED',
         maskNumbers: Boolean(settings?.maskNumbers),
         sendTenantIdInDial: settings?.sendTenantIdInDial ?? true,
+        autoDialOnClick: settings?.autoDialOnClick ?? true,
       },
     });
   } catch (error) {
@@ -189,6 +191,9 @@ router.get('/client-config', async (req: AuthRequest, res: Response) => {
 });
 
 router.post('/dialpad-call-started', async (req: AuthRequest, res: Response) => {
+  if (req.impersonation) {
+    return res.status(403).json({ success: false, ok: false, code: 'IMPERSONATION_DISABLED', message: 'Calls are disabled while viewing as another user.' });
+  }
   const parsed = dialpadCallSchema.safeParse(req.body);
   if (!parsed.success) {
     const manual = manualDialpadCallSchema.safeParse(req.body);
@@ -254,6 +259,15 @@ router.post('/dialpad-call-started', async (req: AuthRequest, res: Response) => 
     if (!lead || !(await canAccessLead(req.user!, lead))) {
       return res.status(404).json({ success: false, ok: false, code: 'LEAD_NOT_FOUND', message: 'Lead not found.' });
     }
+    if (parsed.data.taskId) {
+      const task = await prisma.followUp.findFirst({
+        where: { id: parsed.data.taskId, tenantId: req.tenantId!, leadId: lead.id },
+        select: { id: true },
+      });
+      if (!task) {
+        return res.status(404).json({ success: false, ok: false, code: 'TASK_NOT_FOUND', message: 'The follow-up could not be found for this lead.' });
+      }
+    }
     const selected = parsed.data.phoneField === 'mobile'
       ? { phone: lead.mobile, countryCode: lead.countryCode }
       : parsed.data.phoneField === 'secondaryPhone'
@@ -293,7 +307,6 @@ router.post('/dialpad-call-started', async (req: AuthRequest, res: Response) => 
         },
         select: { id: true },
       });
-      await applyCallLogStatusRule(lead.id, tx, { tenantId: req.tenantId!, userId: req.user!.id, callLogId: created.id });
       await tx.auditLog.create({
         data: {
           tenantId: req.tenantId!,
@@ -307,7 +320,19 @@ router.post('/dialpad-call-started', async (req: AuthRequest, res: Response) => 
       });
       return created;
     });
-    return res.status(201).json({ success: true, ok: true, data: { callDetailId: call.id, leadId: lead.id, leadName: displayName, dialNumber: normalized.e164 } });
+    return res.status(201).json({
+      success: true,
+      ok: true,
+      data: {
+        callDetailId: call.id,
+        normalizedNumber: normalized.e164,
+        leadName: displayName,
+        recordId: lead.id,
+        ...(parsed.data.taskId ? { taskId: parsed.data.taskId } : {}),
+        tenantId: req.tenantId!,
+        allowed: true,
+      },
+    });
   } catch (error) {
     console.error('Dialpad call-started error', error instanceof Error ? error.name : 'error');
     return res.status(500).json({ success: false, ok: false, code: 'CALL_START_FAILED', message: 'The call could not be recorded.' });
@@ -357,7 +382,7 @@ router.post('/dialpad-event', async (req: AuthRequest, res: Response) => {
           },
         })
         : null;
-      if (!existing) {
+      if (!existing && !event.callUuid) {
         existing = await tx.callDetail.findFirst({
           where: {
             tenantId: req.tenantId!,
@@ -467,7 +492,11 @@ router.post('/dialpad-event', async (req: AuthRequest, res: Response) => {
           ].filter(Boolean).join('\n'),
         });
       }
-      if (event.event === 'BIZCALL_CALL_STARTING' && shouldAudit && lead) {
+      if (
+        ['BIZCALL_CALL_STARTING', 'BIZCALL_CALL_CONNECTED'].includes(event.event)
+        && shouldAudit
+        && lead
+      ) {
         await applyCallLogStatusRule(lead.id, tx, {
           tenantId: req.tenantId!,
           userId: req.user!.id,
@@ -493,6 +522,14 @@ export function readClickToCallRequest(body: unknown): { leadId: string; phoneFi
 }
 
 router.post('/click-to-call', async (req: AuthRequest, res: Response) => {
+  if (req.impersonation) {
+    return res.status(403).json({
+      success: false,
+      ok: false,
+      code: 'IMPERSONATION_DISABLED',
+      message: 'Calls are disabled while viewing as another user.',
+    });
+  }
   try {
     const request = readClickToCallRequest(req.body);
     const result = await placeClickToCall({

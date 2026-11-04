@@ -107,7 +107,22 @@ describe('bootstrapTenant', () => {
 
     const permissionData = vi.mocked(tx.permission.createMany).mock.calls[0]?.[0]?.data ?? [];
     const permissionNames = (Array.isArray(permissionData) ? permissionData : [permissionData]).map(({ name }) => name);
-    expect(permissionNames).toEqual(expect.arrayContaining(['FULL_SYSTEM_ACCESS', 'LEAD_READ', 'PROJECT_READ']));
+    expect(permissionNames).toEqual(expect.arrayContaining([
+      'FULL_SYSTEM_ACCESS',
+      'LEAD_READ',
+      'PROJECT_READ',
+      'ENQUIRY_READ',
+      'ENQUIRY_CREATE',
+      'TELEPHONY_CALL',
+    ]));
+    const adminGrants = vi.mocked(tx.userProfilePermission.createMany).mock.calls[0]?.[0]?.data ?? [];
+    expect(adminGrants).toEqual(expect.arrayContaining([
+      { profileId: 'admin-profile', permissionId: 'permission-ENQUIRY_READ' },
+    ]));
+    const standardGrants = vi.mocked(tx.userProfilePermission.createMany).mock.calls[1]?.[0]?.data ?? [];
+    expect(standardGrants).not.toEqual(expect.arrayContaining([
+      { profileId: 'standard-profile', permissionId: 'permission-ENQUIRY_READ' },
+    ]));
     expect(permissionNames).not.toEqual(expect.arrayContaining([
       'OPPORTUNITY_READ',
       'QUOTATION_READ',
