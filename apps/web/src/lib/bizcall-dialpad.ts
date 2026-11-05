@@ -5,8 +5,6 @@ type DialpadLock = { ownerId?: string; heartbeatAt?: number } | null;
 type StorageLike = Pick<Storage, "getItem" | "setItem">;
 
 export type DialerCommand =
-  | { type: "INIT_USER"; userId: string }
-  | { type: "DIAL"; number: string; recordId: string; leadName: string; taskId?: string; tenantId?: string }
   | { type: "BIZCALL_HANGUP" };
 
 export type DialpadMonitorEntry = {
@@ -57,26 +55,6 @@ export function claimDialpadLock(storage: StorageLike, key: string, ownerId: str
   }
 }
 
-export function buildBizcallDialpadUrl(url: string, userId: string, theme: "CRM" | "LIGHT" | "DARK", number?: string) {
-  const dialpadUrl = new URL(url);
-  dialpadUrl.searchParams.set("userId", userId);
-  dialpadUrl.searchParams.set("theme", theme.toLowerCase() === "crm" ? "light" : theme.toLowerCase());
-  if (number) dialpadUrl.searchParams.set("number", number);
-  return dialpadUrl.toString();
-}
-
-export function openBizcallDialpad(
-  url: string,
-  userId: string,
-  tenantId: string,
-  theme: "CRM" | "LIGHT" | "DARK",
-  openWindow: (url: string, target: string) => WindowProxy | null,
-  number?: string,
-) {
-  const targetName = `${BIZCALL_DIALPAD_WINDOW_NAME}-${encodeURIComponent(tenantId)}-${encodeURIComponent(userId)}`;
-  return openWindow(buildBizcallDialpadUrl(url, userId, theme, number), targetName);
-}
-
 export function maskDialpadNumber(value: unknown): string {
   if (typeof value !== "string") return "";
   const normalized = value.trim();
@@ -120,13 +98,6 @@ export function sendDialerCommand(
     return { ok: false, reason: "INVALID_ORIGIN" };
   }
   if (origin !== targetOrigin || origin === "*" || origin === "null") return { ok: false, reason: "INVALID_ORIGIN" };
-  if (command.type === "INIT_USER" && !command.userId.trim()) return { ok: false, reason: "INVALID_COMMAND" };
-  if (command.type === "DIAL" && (
-    !/^\+[1-9]\d{1,14}$/.test(command.number)
-    || !command.recordId.trim()
-    || !command.leadName.trim()
-    || (command.taskId !== undefined && !command.taskId.trim())
-  )) return { ok: false, reason: "INVALID_COMMAND" };
   target.postMessage(command, origin);
   return { ok: true };
 }

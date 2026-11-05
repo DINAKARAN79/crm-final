@@ -3,15 +3,14 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ArrowLeft, Eye, EyeOff, Phone } from "lucide-react";
+import { ArrowLeft, Phone } from "lucide-react";
 import { telephonySettingsApi } from "@/lib/api";
-import { openBizcallDialpad } from "@/lib/bizcall-dialpad";
+import { BIZCALL_DIALPAD_WINDOW_NAME } from "@/lib/bizcall-dialpad";
 import {
   readDialpadMonitorEntries,
   subscribeDialpadMonitor,
   type DialpadMonitorEntry,
 } from "@/lib/bizcall-dialpad";
-import { requestDialerCommand } from "@/lib/telephony-client";
 import { getSafeTelephonyReturnTo } from "@/lib/telephony-navigation";
 import { useAuth } from "@/contexts/auth-context";
 import { useToast } from "@/hooks/use-toast";
@@ -19,24 +18,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
-const DEFAULT_CLICK_URL = "https://bizcall.cxteletech.com/api/integration/click2call";
 const DEFAULT_DIALPAD_URL = "https://bizcall.cxteletech.com/embed/dialpad";
 
 type TelephonySettings = {
-  clickToCallUrl: string;
-  authHeaderName: string;
-  callerId?: string;
-  allowTestUrl?: boolean;
-  callIdFieldPath?: string;
   isActive: boolean;
-  hasKey: boolean;
-  keyLastFour: string;
   status: string;
   statusLabel: string;
   dialpadUrl: string;
   dialpadOrigin: string;
   dialpadMode: "DOCKED" | "NEW_TAB";
-  callMethod: "SERVER_API" | "DIALPAD_MESSAGE";
   defaultDockState: "COLLAPSED" | "EXPANDED";
   theme: "CRM" | "LIGHT" | "DARK";
   productionOrigin: string;
@@ -49,18 +39,9 @@ type TelephonySettings = {
   dncNumbers: string;
 };
 
-type Probe = {
-  reached?: boolean;
-  httpStatus?: number | null;
-  durationMs?: number;
-  reason?: string;
-};
-
 type EnvironmentCheck = {
   tables: { telephonySettings: boolean; telephonyAgentPermissions: boolean };
   permissionProfiles: Array<{ name: string; granted: boolean }>;
-  encryptionSecretPresent: boolean;
-  keySaved: boolean;
   apiBaseUrl: string | null;
   apiBaseUrlSource: string;
   dialpadUrl: string;
@@ -84,27 +65,14 @@ export default function TelephonySettingsPage() {
   );
   const [loading, setLoading] = React.useState(true);
   const [saving, setSaving] = React.useState(false);
-  const [testing, setTesting] = React.useState(false);
   const [status, setStatus] = React.useState("not_configured");
-  const [statusLabel, setStatusLabel] = React.useState("Key missing");
-  const [hasKey, setHasKey] = React.useState(false);
-  const [keyLastFour, setKeyLastFour] = React.useState("");
-  const [editingKey, setEditingKey] = React.useState(true);
-  const [showKeyInput, setShowKeyInput] = React.useState(false);
-  const [clickToCallUrl, setClickToCallUrl] = React.useState(DEFAULT_CLICK_URL);
-  const [authHeaderName, setAuthHeaderName] = React.useState("X-API-KEY");
-  const [authToken, setAuthToken] = React.useState("");
-  const [callerId, setCallerId] = React.useState("");
+  const [statusLabel, setStatusLabel] = React.useState("Not configured");
   const [isActiveSetting, setIsActiveSetting] = React.useState(false);
-  const [allowTestUrl, setAllowTestUrl] = React.useState(false);
-  const [callIdFieldPath, setCallIdFieldPath] = React.useState("");
-  const [probe, setProbe] = React.useState<Probe | null>(null);
   const [environment, setEnvironment] = React.useState<EnvironmentCheck | null>(null);
   const [securePage, setSecurePage] = React.useState<boolean | null>(null);
   const [grantingProfiles, setGrantingProfiles] = React.useState(false);
   const [dialpadUrl, setDialpadUrl] = React.useState(DEFAULT_DIALPAD_URL);
   const [dialpadMode, setDialpadMode] = React.useState<"DOCKED" | "NEW_TAB">("DOCKED");
-  const [callMethod, setCallMethod] = React.useState<"SERVER_API" | "DIALPAD_MESSAGE">("SERVER_API");
   const [defaultDockState, setDefaultDockState] = React.useState<"COLLAPSED" | "EXPANDED">("COLLAPSED");
   const [theme, setTheme] = React.useState<"CRM" | "LIGHT" | "DARK">("CRM");
   const [productionOrigin, setProductionOrigin] = React.useState("");
@@ -112,7 +80,7 @@ export default function TelephonySettingsPage() {
   const [callsPerMinute, setCallsPerMinute] = React.useState(10);
   const [maskNumbers, setMaskNumbers] = React.useState(false);
   const [sendTenantIdInDial, setSendTenantIdInDial] = React.useState(true);
-  const [autoDialOnClick, setAutoDialOnClick] = React.useState(true);
+  const [autoDialOnClick, setAutoDialOnClick] = React.useState(false);
   const [blockDnc, setBlockDnc] = React.useState(false);
   const [dncNumbers, setDncNumbers] = React.useState("");
   const [agents, setAgents] = React.useState<Array<{ userId: string; userName: string; profileId: string | null; profileName: string; canUseTelephony: boolean; registeredInBizcall: string; lastCallAt: string | null }>>([]);
@@ -122,33 +90,22 @@ export default function TelephonySettingsPage() {
     httpStatus: number;
     headers: { xFrameOptions: string | null; contentSecurityPolicy: string | null; frameAncestors: string | null };
   } | null>(null);
-  const [testCalling, setTestCalling] = React.useState(false);
+  const [openingTestDialpad, setOpeningTestDialpad] = React.useState(false);
+  const [pendingTestDialpadUrl, setPendingTestDialpadUrl] = React.useState("");
   const [baseline, setBaseline] = React.useState<string | null>(null);
   const currentSettings = {
-    clickToCallUrl, authHeaderName, authToken, callerId, isActiveSetting, allowTestUrl,
-    callIdFieldPath, dialpadUrl, dialpadMode, callMethod, defaultDockState, theme,
+    isActiveSetting, dialpadUrl, dialpadMode, defaultDockState, theme,
     productionOrigin, duplicateGuardSeconds, callsPerMinute, maskNumbers, sendTenantIdInDial, autoDialOnClick, blockDnc, dncNumbers,
   };
   const isDirty = baseline !== null && baseline !== JSON.stringify(currentSettings);
   const highlightTimers = React.useRef<number[]>([]);
 
   const applySettings = (data: TelephonySettings) => {
-    setClickToCallUrl(data.clickToCallUrl || DEFAULT_CLICK_URL);
-    setAuthHeaderName(data.authHeaderName || "X-API-KEY");
-    setCallerId(data.callerId || "");
     setIsActiveSetting(Boolean(data.isActive));
-    setAllowTestUrl(Boolean(data.allowTestUrl));
-    setCallIdFieldPath(data.callIdFieldPath || "");
-    setHasKey(Boolean(data.hasKey));
-    setKeyLastFour(data.keyLastFour || "");
-    setEditingKey(!data.hasKey);
-    setShowKeyInput(false);
-    setAuthToken("");
     setStatus(data.status || "not_configured");
-    setStatusLabel(data.statusLabel || "Key missing");
+    setStatusLabel(data.statusLabel || "Not configured");
     setDialpadUrl(data.dialpadUrl || DEFAULT_DIALPAD_URL);
     setDialpadMode(data.dialpadMode || "DOCKED");
-    setCallMethod(data.callMethod || "SERVER_API");
     setDefaultDockState(data.defaultDockState || "COLLAPSED");
     setTheme(data.theme || "CRM");
     setProductionOrigin(data.productionOrigin || "");
@@ -156,20 +113,13 @@ export default function TelephonySettingsPage() {
     setCallsPerMinute(data.callsPerMinute || 10);
     setMaskNumbers(Boolean(data.maskNumbers));
     setSendTenantIdInDial(data.sendTenantIdInDial ?? true);
-    setAutoDialOnClick(data.autoDialOnClick ?? true);
+    setAutoDialOnClick(data.autoDialOnClick ?? false);
     setBlockDnc(Boolean(data.blockDnc));
     setDncNumbers(data.dncNumbers || "");
     setBaseline(JSON.stringify({
-      clickToCallUrl: data.clickToCallUrl || DEFAULT_CLICK_URL,
-      authHeaderName: data.authHeaderName || "X-API-KEY",
-      authToken: "",
-      callerId: data.callerId || "",
       isActiveSetting: Boolean(data.isActive),
-      allowTestUrl: Boolean(data.allowTestUrl),
-      callIdFieldPath: data.callIdFieldPath || "",
       dialpadUrl: data.dialpadUrl || DEFAULT_DIALPAD_URL,
       dialpadMode: data.dialpadMode || "DOCKED",
-      callMethod: data.callMethod || "SERVER_API",
       defaultDockState: data.defaultDockState || "COLLAPSED",
       theme: data.theme || "CRM",
       productionOrigin: data.productionOrigin || "",
@@ -177,7 +127,7 @@ export default function TelephonySettingsPage() {
       callsPerMinute: data.callsPerMinute || 10,
       maskNumbers: Boolean(data.maskNumbers),
       sendTenantIdInDial: data.sendTenantIdInDial ?? true,
-      autoDialOnClick: data.autoDialOnClick ?? true,
+      autoDialOnClick: data.autoDialOnClick ?? false,
       blockDnc: Boolean(data.blockDnc),
       dncNumbers: data.dncNumbers || "",
     }));
@@ -318,31 +268,12 @@ export default function TelephonySettingsPage() {
   }, [isDirty]);
 
   const save = async () => {
-    const trimmedKey = authToken.trim();
-    if (isActiveSetting && !hasKey && !trimmedKey) {
-      toast({
-        title: "Bizcall API key required",
-        description: "Enter the Bizcall API key before turning telephony on.",
-        variant: "destructive",
-      });
-      return;
-    }
-    if (isActiveSetting && !clickToCallUrl.trim()) {
-      toast({ title: "Click-to-call URL required", description: "Enter the Bizcall URL before turning telephony on.", variant: "destructive" });
-      return;
-    }
     setSaving(true);
     try {
       const response = await telephonySettingsApi.update({
-        clickToCallUrl: clickToCallUrl.trim(),
-        authHeaderName: authHeaderName.trim(),
-        callerId: callerId.trim(),
         isActive: isActiveSetting,
-        allowTestUrl,
-        callIdFieldPath,
         dialpadUrl: dialpadUrl.trim(),
         dialpadMode,
-        callMethod,
         defaultDockState,
         theme,
         productionOrigin: productionOrigin.trim(),
@@ -353,10 +284,9 @@ export default function TelephonySettingsPage() {
         autoDialOnClick,
         blockDnc,
         dncNumbers,
-        ...(trimmedKey ? { authToken: trimmedKey } : {}),
       }, tenantId || undefined);
       if (response.data.data) applySettings(response.data.data as TelephonySettings);
-      toast({ title: "Telephony saved", description: "Click-to-call will use these settings." });
+      toast({ title: "Telephony saved", description: "Dialpad settings are ready to use." });
       try {
         const environmentResponse = await telephonySettingsApi.environmentCheck(tenantId || undefined);
         if (environmentResponse.data.data) setEnvironment(environmentResponse.data.data as EnvironmentCheck);
@@ -371,19 +301,6 @@ export default function TelephonySettingsPage() {
       });
     } finally {
       setSaving(false);
-    }
-  };
-
-  const testConnection = async () => {
-    setTesting(true);
-    setProbe(null);
-    try {
-      const response = await telephonySettingsApi.testConnection(tenantId || undefined);
-      setProbe(response.data.data as Probe || { reason: response.data.message });
-    } catch (error: unknown) {
-      setProbe({ reached: false, reason: errorMessage(error, "The connection test could not run.") });
-    } finally {
-      setTesting(false);
     }
   };
 
@@ -419,16 +336,30 @@ export default function TelephonySettingsPage() {
     }
   };
 
-  const testCall = async () => {
-    if (!window.confirm("Place a real test call to the phone number on your admin profile?")) return;
-    setTestCalling(true);
+  const openDialpadWithMyNumber = async () => {
+    const popup = window.open("about:blank", BIZCALL_DIALPAD_WINDOW_NAME);
+    setOpeningTestDialpad(true);
+    setPendingTestDialpadUrl("");
     try {
-      const response = await telephonySettingsApi.testCall(tenantId || undefined);
-      toast({ title: response.data.ok ? "Test call sent" : "Test call failed", description: response.data.message || "Check the telephony settings.", variant: response.data.ok ? undefined : "destructive" });
+      const response = await telephonySettingsApi.openDialpadWithMyNumber(tenantId || undefined);
+      const dialpadUrl = String(response.data.data?.dialpadUrl || "");
+      const parsed = new URL(dialpadUrl);
+      if (parsed.protocol !== "https:" || parsed.hostname !== "bizcall.cxteletech.com") {
+        throw new Error("The server returned an invalid Bizcall dialpad URL.");
+      }
+      if (popup) {
+        popup.location.replace(parsed.toString());
+        popup.focus();
+        toast({ title: "Dialpad opened", description: "No call is placed unless Auto-dial on click is enabled." });
+      } else {
+        setPendingTestDialpadUrl(parsed.toString());
+        toast({ title: "Popup blocked", description: "Allow popups for this site, or use the button to open the dialpad manually.", variant: "destructive" });
+      }
     } catch (error: unknown) {
-      toast({ title: "Test call failed", description: errorMessage(error, "The test call could not be completed."), variant: "destructive" });
+      popup?.close();
+      toast({ title: "Unable to open dialpad", description: errorMessage(error, "The dialpad could not be opened."), variant: "destructive" });
     } finally {
-      setTestCalling(false);
+      setOpeningTestDialpad(false);
     }
   };
 
@@ -446,14 +377,6 @@ export default function TelephonySettingsPage() {
       });
     } finally {
       setCheckingEmbedding(false);
-    }
-  };
-
-  const openDialpadNow = () => {
-    try {
-      openBizcallDialpad(dialpadUrl, user?.id || "", tenant?.id || tenantId, theme, (url, target) => window.open(url, target));
-    } catch {
-      toast({ title: "Invalid dialpad URL", description: "Enter a valid HTTPS dialpad URL first.", variant: "destructive" });
     }
   };
 
@@ -492,7 +415,7 @@ export default function TelephonySettingsPage() {
             <h1 className="text-xl font-semibold">Telephony</h1>
             <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${badgeClass}`}>{statusLabel}</span>
           </div>
-          <p className="text-sm text-muted-foreground">Configure Bizcall click-to-call for this company.</p>
+          <p className="text-sm text-muted-foreground">Configure the Bizcall dialpad for this company.</p>
         </div>
       </div>
 
@@ -514,12 +437,11 @@ export default function TelephonySettingsPage() {
               <input
                 type="checkbox"
                 checked={isActiveSetting}
-                disabled={!hasKey && !authToken.trim()}
                 onChange={(event) => setIsActiveSetting(event.target.checked)}
               />
               Active
             </label>
-            {!hasKey && !authToken.trim() ? <p className="text-xs text-amber-700">Add a Bizcall API key before enabling telephony.</p> : null}
+            <p className="text-xs text-muted-foreground">Telephony requires a valid HTTPS dialpad URL. No Bizcall API key is used.</p>
           </section>
 
           {isAdmin || isSuperAdmin ? (
@@ -531,8 +453,6 @@ export default function TelephonySettingsPage() {
                   <dt className="text-muted-foreground">TELEPHONY_CALL permission</dt>
                   <dd>{environment ? environment.permissionProfiles.filter((profile) => profile.granted).map((profile) => profile.name).join(", ") || "No default profile has it" : "Checking…"}</dd>
                 </div>
-                <div><dt className="text-muted-foreground">Encryption secret present</dt><dd>{environment ? (environment.encryptionSecretPresent ? "Yes" : "No") : "Checking…"} (value is never shown)</dd></div>
-                <div><dt className="text-muted-foreground">Bizcall key saved</dt><dd>{environment ? (environment.keySaved ? "Yes" : "No") : "Checking…"}</dd></div>
                 <div><dt className="text-muted-foreground">Page served over HTTPS</dt><dd>{securePage === null ? "Checking…" : securePage ? "Yes" : "No — microphones are blocked on plain HTTP."}</dd></div>
                 <div className="min-w-0"><dt className="text-muted-foreground">API base URL detected</dt><dd className="break-all">{environment?.apiBaseUrl || "Unavailable"}{environment?.apiBaseUrlSource ? ` (${environment.apiBaseUrlSource})` : ""}</dd></div>
                 <div><dt className="text-muted-foreground">Bizcall allows this iframe origin</dt><dd>{embeddingResult?.verdict || "Checking…"}<span className="mt-1 block break-all text-xs text-muted-foreground">{typeof window !== "undefined" ? window.location.origin : ""}</span></dd></div>
@@ -558,78 +478,22 @@ export default function TelephonySettingsPage() {
               <Phone className="h-4 w-4" />
               <p className="text-sm font-medium">Bizcall connection</p>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="telephony-click-url">Click-to-call URL</Label>
-              <Input id="telephony-click-url" value={clickToCallUrl} onChange={(event) => setClickToCallUrl(event.target.value)} placeholder={DEFAULT_CLICK_URL} />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="telephony-header-name">Auth header name</Label>
-              <Input id="telephony-header-name" value={authHeaderName} onChange={(event) => setAuthHeaderName(event.target.value)} placeholder="X-API-KEY" />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="telephony-token">Bizcall API key</Label>
-              {hasKey && !editingKey ? (
-                <div className="flex flex-wrap items-center gap-3">
-                  <p className="text-sm" aria-label="Saved Bizcall API key">
-                    Key saved: bc_live_••••••••{keyLastFour}
-                  </p>
-                  <Button type="button" variant="outline" size="sm" onClick={() => {
-                    setEditingKey(true);
-                    setAuthToken("");
-                    setShowKeyInput(false);
-                  }}>
-                    Change key
-                  </Button>
-                </div>
-              ) : (
-                <>
-                  <div className="relative">
-                    <Input
-                      id="telephony-token"
-                      type={showKeyInput ? "text" : "password"}
-                      autoComplete="new-password"
-                      value={authToken}
-                      onChange={(event) => setAuthToken(event.target.value)}
-                      placeholder="Paste the Bizcall API key"
-                      className="pr-11"
-                    />
-                    <button
-                      type="button"
-                      className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground"
-                      aria-label={showKeyInput ? "Hide API key" : "Show API key"}
-                      onClick={() => setShowKeyInput((current) => !current)}
-                    >
-                      {showKeyInput ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                    </button>
-                  </div>
-                  <p className="text-xs text-muted-foreground">Create it in Bizcall &gt; Integrations Hub. It starts with bc_live_.</p>
-                  {authToken.trim() && !authToken.trim().startsWith("bc_live_") ? (
-                    <p className="text-xs text-amber-700">This key does not start with bc_live_. Check that you copied the correct Bizcall API key.</p>
-                  ) : null}
-                </>
-              )}
-              {hasKey && editingKey ? (
-                <p className="text-xs text-muted-foreground">Leave this empty to keep the currently saved key.</p>
-              ) : null}
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="telephony-caller-id">Caller ID (optional)</Label>
-              <Input id="telephony-caller-id" value={callerId} onChange={(event) => setCallerId(event.target.value)} />
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <Button type="button" variant="outline" disabled={testing || !hasKey} onClick={() => void testConnection()}>
-                {testing ? "Testing..." : "Test connection"}
+            <p className="text-sm text-muted-foreground">Phone clicks are validated by the CRM and loaded into the dialpad. The CRM does not call Bizcall&apos;s REST API.</p>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button type="button" variant="outline" disabled={openingTestDialpad || !isActiveSetting} onClick={() => void openDialpadWithMyNumber()}>
+                {openingTestDialpad ? "Opening..." : "Open dialpad with my number"}
               </Button>
-              <Button type="button" variant="outline" disabled={testCalling || !hasKey || !isActiveSetting} onClick={() => void testCall()}>
-                {testCalling ? "Calling..." : "Place test call to my number"}
-              </Button>
+              {!isActiveSetting ? <span className="text-xs text-muted-foreground">Turn on Active before opening the dialpad.</span> : null}
             </div>
-            {probe ? (
-              <div className="rounded-md border border-sky-100 bg-sky-50 px-3 py-2 text-sm">
-                <p className="font-medium">{probe.reached ? "Reached" : "Not reached"}</p>
-                <p>{probe.reason}</p>
-                <p className="text-muted-foreground">HTTP status: {probe.httpStatus ?? "none"} · {probe.durationMs ?? 0} ms</p>
-              </div>
+            {pendingTestDialpadUrl ? (
+              <Button type="button" variant="outline" onClick={() => {
+                const popup = window.open(pendingTestDialpadUrl, BIZCALL_DIALPAD_WINDOW_NAME);
+                if (!popup) {
+                  toast({ title: "Popup blocked", description: "Allow popups for this site and try again.", variant: "destructive" });
+                  return;
+                }
+                setPendingTestDialpadUrl("");
+              }}>Open dialpad manually</Button>
             ) : null}
 
             <section id="dialpad" className="space-y-4 border-t pt-5">
@@ -652,15 +516,6 @@ export default function TelephonySettingsPage() {
                     <option value="DOCKED">Docked panel inside the CRM (recommended)</option>
                     <option value="NEW_TAB">Open in a new tab</option>
                   </select>
-                </label>
-                <label className="space-y-2 text-sm">
-                  <span className="font-medium">Call method per click</span>
-                  <select className="h-10 w-full rounded-md border bg-background px-3" value={callMethod} onChange={(event) => setCallMethod(event.target.value as "SERVER_API" | "DIALPAD_MESSAGE")}>
-                    <option value="SERVER_API">Server API (Bizcall rings agent, then customer)</option>
-                    <option value="DIALPAD_MESSAGE">Dialpad message (DIAL via postMessage)</option>
-                  </select>
-                  <span className="block text-xs text-muted-foreground">Only the selected method runs for a click. Never both.</span>
-                  {callMethod === "DIALPAD_MESSAGE" ? <span className="block text-xs text-muted-foreground">Clicking a number sends a DIAL message to the Bizcall dialpad. The agent&apos;s dialpad must be open and ONLINE.</span> : null}
                 </label>
                 <label className="space-y-2 text-sm">
                   <span className="font-medium">Default dock state</span>
@@ -690,7 +545,7 @@ export default function TelephonySettingsPage() {
                 <div className="mt-2 flex gap-2">
                   <Button type="button" variant="outline" size="sm" onClick={() => void copyOrigins()}>Copy origins</Button>
                   <Button type="button" variant="outline" size="sm" disabled={checkingEmbedding} onClick={checkEmbedding}>{checkingEmbedding ? "Checking…" : "Check iframe"}</Button>
-                  <Button type="button" variant="outline" size="sm" onClick={openDialpadNow}>Open dialpad now</Button>
+                  <Button type="button" variant="outline" size="sm" onClick={() => void openDialpadWithMyNumber()}>Open dialpad with my number</Button>
                 </div>
                 <p className="mt-2 text-xs text-muted-foreground">
                   If the dialpad shows &quot;refused to connect&quot;, ask Bizcall to allow {typeof window !== "undefined" ? window.location.origin : "this CRM origin"} in frame-ancestors, or use &quot;Open in a new tab&quot;.
@@ -724,10 +579,12 @@ export default function TelephonySettingsPage() {
                 </label>
               </div>
               <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={maskNumbers} onChange={(event) => setMaskNumbers(event.target.checked)} /> Mask customer numbers for agents</label>
+              <p className="-mt-1 text-xs text-muted-foreground">Masking is display-only; the real number is sent to Bizcall so it can be called.</p>
               <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={sendTenantIdInDial} onChange={(event) => setSendTenantIdInDial(event.target.checked)} /> Send tenantId in DIAL</label>
               <p className="-mt-1 text-xs text-muted-foreground">Bizcall may ignore this extra field.</p>
               <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={autoDialOnClick} onChange={(event) => setAutoDialOnClick(event.target.checked)} /> Auto-dial on click</label>
-              <p className="-mt-1 text-xs text-muted-foreground">When off, the number is prefilled in the dialpad; the agent must press the green call button.</p>
+              <p className="-mt-1 text-xs text-muted-foreground">When off, the number is loaded into the dialpad and the agent must press the green call button.</p>
+              <p className="-mt-1 text-xs text-muted-foreground">Allow popups for this site and allow the microphone for bizcall.cxteletech.com.</p>
               <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={blockDnc} onChange={(event) => setBlockDnc(event.target.checked)} /> Block Do-Not-Call numbers</label>
               <div className="space-y-2">
                 <Label htmlFor="dnc-numbers">Do-Not-Call numbers (E.164, one per line)</Label>
@@ -774,7 +631,6 @@ export default function TelephonySettingsPage() {
 
 function PostMessageMonitor({ tenantId, userId }: { tenantId: string; userId: string }) {
   const [entries, setEntries] = React.useState<DialpadMonitorEntry[]>([]);
-  const [commandError, setCommandError] = React.useState("");
 
   React.useEffect(() => {
     if (!tenantId || !userId) return;
@@ -783,24 +639,13 @@ function PostMessageMonitor({ tenantId, userId }: { tenantId: string; userId: st
     return subscribeDialpadMonitor(refresh);
   }, [tenantId, userId]);
 
-  const sendInit = () => {
-    const result = requestDialerCommand({ type: "INIT_USER", userId });
-    setCommandError(result.ok ? "" : "Dialpad is not loaded or ready. Open the dock and try again.");
-  };
   return (
     <section className="mt-6 space-y-3 rounded-lg border p-4" aria-label="postMessage monitor">
       <div>
         <h2 className="font-semibold">postMessage monitor</h2>
         <p className="text-sm text-muted-foreground">Last 50 commands and events for this tenant and user. Numbers are masked and notes are redacted.</p>
       </div>
-      {commandError && <p role="alert" className="text-sm text-destructive">{commandError}</p>}
-      <div className="grid gap-2 sm:grid-cols-2">
-        <Button type="button" variant="outline" onClick={sendInit} disabled={!userId}>Send INIT_USER</Button>
-        <p className="self-center text-xs text-muted-foreground">A Bizcall-confirmed sandbox mode or number is required before DIAL can be tested safely.</p>
-        <Button type="button" variant="outline" disabled title="Waiting for a Bizcall-confirmed sandbox destination">
-          Send test DIAL
-        </Button>
-      </div>
+      <p className="text-xs text-muted-foreground">The server supplies the signed-in user identity and any clicked number in the dialpad URL. No DIAL or INIT_USER command is sent.</p>
       <div className="max-h-72 overflow-auto rounded border">
         {!entries.length ? <p className="p-3 text-sm text-muted-foreground">No postMessage activity recorded in this session.</p> : (
           <ul className="divide-y">

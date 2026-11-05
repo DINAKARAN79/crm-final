@@ -41,4 +41,34 @@ describe('API proxy', () => {
       }),
     );
   });
+
+  it('returns 504 when the backend proxy request times out', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new DOMException('Timed out', 'TimeoutError')));
+    const request = new NextRequest('http://localhost/api/proxy/api/auth/me', {
+      method: 'POST',
+    });
+
+    const response = await POST(request, { params: { path: ['api', 'auth', 'me'] } });
+
+    expect(response.status).toBe(504);
+    await expect(response.json()).resolves.toMatchObject({
+      success: false,
+      error: 'Backend service timed out',
+    });
+  });
+
+  it('returns 502 when the backend connection fails', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('fetch failed')));
+    const request = new NextRequest('http://localhost/api/proxy/api/auth/me', {
+      method: 'POST',
+    });
+
+    const response = await POST(request, { params: { path: ['api', 'auth', 'me'] } });
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toMatchObject({
+      success: false,
+      error: 'Unable to connect to backend service',
+    });
+  });
 });

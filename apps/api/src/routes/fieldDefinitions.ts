@@ -62,6 +62,24 @@ router.get('/:objectName', async (req: AuthRequest, res: Response) => {
     let fields: any[] = allFields;
     if (includeSystem !== 'true') fields = fields.filter((field: any) => !field.isSystemField);
     if (includeInactive !== 'true') fields = fields.filter((field: any) => field.isActive);
+    if (includeInactive === 'true') {
+      const storedFields = fields.filter((field) => !field.id.startsWith('standard-'));
+      const picklistValues = await prisma.picklistValue.findMany({
+        where: { fieldId: { in: storedFields.map((field) => field.id) } },
+        orderBy: { displayOrder: 'asc' },
+      });
+      const valuesByFieldId = new Map<string, typeof picklistValues>();
+      for (const value of picklistValues) {
+        const values = valuesByFieldId.get(value.fieldId) || [];
+        values.push(value);
+        valuesByFieldId.set(value.fieldId, values);
+      }
+      fields = fields.map((field) => (
+        field.fieldType === 'picklist' || field.fieldType === 'multiPicklist'
+          ? { ...field, picklistValues: valuesByFieldId.get(field.id) || field.picklistValues }
+          : field
+      ));
+    }
 
     res.json({ success: true, data: fields });
   } catch (error) {
@@ -264,11 +282,16 @@ router.put('/:objectName/:fieldId', requirePermission('PROFILE_PERMISSION_MANAGE
       return res.status(404).json({ success: false, error: 'Field not found' });
     }
 
+    const configurableLeadInterest =
+      object.name.toLowerCase() === 'lead' &&
+      existingField.name === 'leadInterest' &&
+      existingField.fieldType === 'picklist';
+
     if (existingField.isSystemField) {
       return res.status(400).json({ success: false, error: 'System fields cannot be modified' });
     }
 
-    if (existingField.isStandardField) {
+    if (existingField.isStandardField && !configurableLeadInterest) {
       return res.status(400).json({ success: false, error: 'Standard fields cannot be modified' });
     }
 
@@ -283,56 +306,102 @@ router.put('/:objectName/:fieldId', requirePermission('PROFILE_PERMISSION_MANAGE
       picklistValues,
     } = req.body;
 
-    const field = await prisma.fieldDefinition.update({
-      where: { id: req.params.fieldId },
-      data: {
-        ...(label !== undefined && { label }),
-        ...(description !== undefined && { description }),
-        ...(helpText !== undefined && { helpText }),
-        ...(required !== undefined && { required }),
-        ...(unique !== undefined && { unique }),
-        ...(defaultValue !== undefined && { defaultValue }),
-        ...(searchable !== undefined && { searchable }),
-        ...(sortable !== undefined && { sortable }),
-        ...(filterable !== undefined && { filterable }),
-        ...(visible !== undefined && { visible }),
-        ...(editable !== undefined && { editable }),
-        ...(lookupObject !== undefined && { lookupObject }),
-        ...(lookupField !== undefined && { lookupField }),
-        ...(validationRules !== undefined && { validationRules }),
-        ...(displayOrder !== undefined && { displayOrder }),
-        ...(minLength !== undefined && { minLength }),
-        ...(maxLength !== undefined && { maxLength }),
-        ...(minValue !== undefined && { minValue }),
-        ...(maxValue !== undefined && { maxValue }),
-        ...(precision !== undefined && { precision }),
-        ...(scale !== undefined && { scale }),
-        updatedBy: req.user!.id,
-      },
-      include: {
-        picklistValues: {
-          orderBy: { displayOrder: 'asc' },
-        },
-      },
-    });
-
-    if (picklistValues && Array.isArray(picklistValues) && (field.fieldType === 'picklist' || field.fieldType === 'multiPicklist')) {
-      await prisma.picklistValue.deleteMany({ where: { fieldId: field.id } });
-      for (let i = 0; i < picklistValues.length; i++) {
-        const pv = picklistValues[i];
-        const pvValue = pv.value || pv.label.toUpperCase().replace(/[^A-Z0-9]+/g, '_');
-        await prisma.picklistValue.create({
-          data: {
-            tenantId: req.tenantId!,
-            fieldId: field.id,
-            label: pv.label,
-            value: pvValue,
-            isActive: pv.isActive !== false,
-            isDefault: pv.isDefault || false,
-            displayOrder: pv.displayOrder ?? i,
-          },
-        });
+    let normalizedPicklistValues:
+      | { label: string; value: string; isActive: boolean; isDefault: boolean; displayOrder: number }[]
+      | undefined;
+    if (picklistValues !== undefined) {
+      if (!Array.isArray(picklistValues) || (existingField.fieldType !== 'picklist' && existingField.fieldType !== 'multiPicklist')) {
+        return res.status(400).json({ success: false, error: 'Picklist values require a picklist field and an array of values' });
       }
+      normalizedPicklistValues = picklistValues.map((option, index) => {
+        const labelValue = typeof option?.label === 'string' ? option.label.trim() : '';
+        const value = typeof option?.value === 'string' && option.value.trim()
+          ? option.value.trim()
+          : labelValue.toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+        return {
+          label: labelValue,
+          value,
+          isActive: option?.isActive !== false,
+          isDefault: option?.isDefault === true,
+          displayOrder: Number.isInteger(option?.displayOrder) ? option.displayOrder : index,
+        };
+      });
+      if (
+        normalizedPicklistValues.some((option) => !option.label || !option.value) ||
+        new Set(normalizedPicklistValues.map((option) => option.value)).size !== normalizedPicklistValues.length ||
+        normalizedPicklistValues.filter((option) => option.isDefault).length > 1
+      ) {
+        return res.status(400).json({ success: false, error: 'Picklist values must have unique values and at most one default' });
+      }
+    }
+
+    if ((required ?? existingField.required) === true && existingField.fieldType === 'picklist') {
+      const activePicklistValues = normalizedPicklistValues
+        ? normalizedPicklistValues.filter((option) => option.isActive).length
+        : await prisma.picklistValue.count({ where: { fieldId: existingField.id, isActive: true } });
+      if (activePicklistValues === 0) {
+        return res.status(400).json({ success: false, error: 'A required picklist must have at least one active value' });
+      }
+    }
+
+    const field = await prisma.$transaction(async (transaction) => {
+      const updatedField = await transaction.fieldDefinition.update({
+        where: { id: req.params.fieldId },
+        data: {
+          ...(label !== undefined && { label }),
+          ...(description !== undefined && { description }),
+          ...(helpText !== undefined && { helpText }),
+          ...(required !== undefined && { required }),
+          ...(unique !== undefined && { unique }),
+          ...(defaultValue !== undefined && { defaultValue }),
+          ...(searchable !== undefined && { searchable }),
+          ...(sortable !== undefined && { sortable }),
+          ...(filterable !== undefined && { filterable }),
+          ...(visible !== undefined && { visible }),
+          ...(editable !== undefined && { editable }),
+          ...(lookupObject !== undefined && { lookupObject }),
+          ...(lookupField !== undefined && { lookupField }),
+          ...(validationRules !== undefined && { validationRules }),
+          ...(displayOrder !== undefined && { displayOrder }),
+          ...(minLength !== undefined && { minLength }),
+          ...(maxLength !== undefined && { maxLength }),
+          ...(minValue !== undefined && { minValue }),
+          ...(maxValue !== undefined && { maxValue }),
+          ...(precision !== undefined && { precision }),
+          ...(scale !== undefined && { scale }),
+          updatedBy: req.user!.id,
+        },
+      });
+
+      if (normalizedPicklistValues) {
+        const retainedValues = normalizedPicklistValues.map((option) => option.value);
+        await transaction.picklistValue.updateMany({
+          where: {
+            fieldId: updatedField.id,
+            ...(retainedValues.length ? { value: { notIn: retainedValues } } : {}),
+          },
+          data: { isActive: false, isDefault: false },
+        });
+        for (const option of normalizedPicklistValues) {
+          await transaction.picklistValue.upsert({
+            where: { fieldId_value: { fieldId: updatedField.id, value: option.value } },
+            create: {
+              tenantId: req.tenantId!,
+              fieldId: updatedField.id,
+              ...option,
+            },
+            update: option,
+          });
+        }
+      }
+
+      return transaction.fieldDefinition.findFirst({
+        where: { id: updatedField.id, tenantId: req.tenantId!, objectId: object.id },
+        include: { picklistValues: { orderBy: { displayOrder: 'asc' } } },
+      });
+    });
+    if (!field) {
+      throw new Error('Failed to reload the updated field');
     }
 
     await prisma.auditLog.create({

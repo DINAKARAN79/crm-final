@@ -14,6 +14,7 @@ import {
   startImpersonation,
 } from '../services/impersonation';
 import { endSessionBySecret, newSessionSecret, openUserSession } from '../services/userPresence';
+import { clearRefreshTokenCookie, setRefreshTokenCookie } from '../services/sessionTokens';
 
 const router = Router();
 const companyRouter = Router({ mergeParams: true });
@@ -67,10 +68,13 @@ companyRouter.post('/impersonate', async (req: AuthRequest, res: Response) => {
       userAgent: meta.userAgent,
     });
     const sessionSecret = newSessionSecret();
+    const refreshToken = newSessionSecret();
     await openUserSession({
       userId: started.actingUser.id,
       tenantId: started.actingUser.tenantId,
       sessionSecret,
+      refreshTokenSecret: refreshToken,
+      refreshTokenExpiresAt: started.session.hardExpiresAt,
       req,
       isImpersonation: true,
     });
@@ -86,6 +90,7 @@ companyRouter.post('/impersonate', async (req: AuthRequest, res: Response) => {
       impersonationId: started.session.id,
       viewOnly: started.session.viewOnly,
     }, impersonationExpirySeconds(started.session.hardExpiresAt));
+    setRefreshTokenCookie(res, sessionSecret, refreshToken, started.session.hardExpiresAt);
     res.status(201).json({
       success: true,
       data: {
@@ -134,7 +139,10 @@ router.post('/exit', authenticate, async (req: AuthRequest, res: Response) => {
     if (!req.impersonation) {
       return res.status(400).json({ success: false, error: 'You are not viewing a company as its admin.' });
     }
-    if (req.sessionSecret) await endSessionBySecret(req.sessionSecret, 'LOGOUT');
+    if (req.sessionSecret) {
+      await endSessionBySecret(req.sessionSecret, 'LOGOUT');
+      clearRefreshTokenCookie(res, req.sessionSecret);
+    }
     const restored = await exitImpersonation(req.impersonation.id);
     const token = generateToken({
       id: restored.superadmin.id,

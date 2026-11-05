@@ -7,11 +7,10 @@ import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { buildTelephonySettingsHref } from "@/lib/telephony-navigation";
 
-function reasonMessage(reasonCode: string, isAdmin: boolean) {
+function reasonMessage(reasonCode: string) {
   if (["IMPERSONATING", "IMPERSONATION_DISABLED"].includes(reasonCode)) return "Calls are disabled while viewing as another user.";
   if (reasonCode === "NO_PERMISSION") return "You do not have permission to place calls. Ask an admin to grant the Telephony permission.";
   if (reasonCode === "PERMISSION_UNAVAILABLE") return "The telephony permission is not set up on this server.";
-  if (reasonCode === "KEY_MISSING" || reasonCode === "TELEPHONY_KEY_MISSING") return "The Bizcall API key is not saved.";
   if (reasonCode === "DISABLED") return "Telephony is switched off for this company.";
   if (["DIALPAD_BLOCKED", "DIALPAD_EMBED_BLOCKED", "DIALPAD_POPUP_BLOCKED", "EMBED_BLOCKED", "IFRAME_BLOCKED"].includes(reasonCode)) {
     return "The Bizcall dialpad is not allowed on this site.";
@@ -23,7 +22,6 @@ function reasonMessage(reasonCode: string, isAdmin: boolean) {
     return "Calls need HTTPS because browsers block the microphone on plain HTTP.";
   }
   if (reasonCode === "NOT_CONFIGURED") return "Telephony is not set up for this company.";
-  if (reasonCode === "KEY_UNREADABLE" && isAdmin) return "The Bizcall API key cannot be read on this server.";
   return "Telephony is unavailable. Ask an admin to check the company telephony settings.";
 }
 
@@ -43,7 +41,7 @@ export function TelephonyStatusHint({
   const [open, setOpen] = React.useState(false);
   const triggerRef = React.useRef<HTMLButtonElement>(null);
   const contentRef = React.useRef<HTMLDivElement>(null);
-  const message = reasonMessage(reasonCode, isAdmin);
+  const message = reasonMessage(reasonCode);
   const settingsHref = buildTelephonySettingsHref(reasonCode, leadId, tenantId);
   const className = "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
   React.useEffect(() => {

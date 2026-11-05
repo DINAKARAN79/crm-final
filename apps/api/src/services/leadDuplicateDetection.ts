@@ -36,6 +36,29 @@ export interface LeadDuplicateMatch {
   evidence: Array<{ contactKey: string; field: string; ambiguous: boolean }>;
 }
 
+export type LeadDuplicateField = 'phone' | 'email';
+
+export function duplicateLeadFields(matches: LeadDuplicateMatch[]): LeadDuplicateField[] {
+  const fields = new Set<LeadDuplicateField>();
+  for (const match of matches) {
+    for (const item of match.evidence) {
+      if (item.contactKey.startsWith('PHONE:')) fields.add('phone');
+      if (item.contactKey.startsWith('EMAIL:')) fields.add('email');
+    }
+  }
+  const orderedFields: LeadDuplicateField[] = ['phone', 'email'];
+  return orderedFields.filter((field) => fields.has(field));
+}
+
+export function duplicateLeadMessage(fields: LeadDuplicateField[]): string {
+  if (fields.includes('phone') && fields.includes('email')) {
+    return 'This phone number and email already exist in your tenant.';
+  }
+  if (fields.includes('phone')) return 'This phone number already exists in your tenant.';
+  if (fields.includes('email')) return 'This email already exists in your tenant.';
+  return 'A lead with these contact details already exists in your tenant.';
+}
+
 export interface NormalizedPhone {
   e164: string;
   digits: string;

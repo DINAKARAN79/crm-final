@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   queryRaw: vi.fn(),
   findUser: vi.fn(),
   findLead: vi.fn(),
+  findLeadDuplicatesBatch: vi.fn(),
 }));
 
 vi.mock('@dct-crm/db', () => ({
@@ -53,7 +54,60 @@ vi.mock('../services/metadata', () => ({
 vi.mock('../services/enquiryProcessing', () => ({
   processLeadEnquiry: vi.fn(),
   processLeadEnquiryBatch: mocks.processLeadEnquiryBatch,
+  leadDuplicateInputForEnquiry: (input: any) => ({
+    phones: [
+      { field: 'phone', value: input.lead.phone, countryCode: input.enquiry.countryCode },
+      { field: 'mobile', value: input.lead.mobile, countryCode: input.enquiry.countryCode },
+      { field: 'secondaryPhone', value: input.enquiry.secondaryPhone, countryCode: input.enquiry.secondaryCountryCode },
+      { field: 'tertiaryPhone', value: input.enquiry.tertiaryPhone, countryCode: input.enquiry.tertiaryCountryCode },
+    ],
+    emails: [
+      { field: 'email', value: input.lead.email },
+      { field: 'secondaryEmail', value: input.enquiry.secondaryEmail },
+      { field: 'tertiaryEmail', value: input.enquiry.tertiaryEmail },
+    ],
+  }),
   sourceEnumValue: (source: string) => source,
+}));
+vi.mock('../services/leadDuplicateDetection', () => ({
+  duplicateLeadFields: (matches: Array<{ evidence?: Array<{ contactKey: string }> }>) => {
+    const fields = new Set(matches.flatMap((match) => (match.evidence || []).map(({ contactKey }) =>
+      contactKey.startsWith('PHONE:') ? 'phone' : 'email',
+    )));
+    const orderedFields: Array<'phone' | 'email'> = ['phone', 'email'];
+    return orderedFields.filter((field) => fields.has(field));
+  },
+  duplicateLeadMessage: (fields: string[]) => fields.includes('phone') && fields.includes('email')
+    ? 'This phone number and email already exist in your tenant.'
+    : fields.includes('phone')
+      ? 'This phone number already exists in your tenant.'
+      : 'This email already exists in your tenant.',
+  findLeadDuplicatesBatch: mocks.findLeadDuplicatesBatch,
+  leadDuplicateContactKeys: (input: any) => [
+    ...input.phones.flatMap((phone: any) => {
+      const digits = String(phone.value || '').replace(/\D/g, '');
+      return digits ? [`PHONE:+${phone.countryCode || '91'}${digits.replace(/^0+/, '')}`] : [];
+    }),
+    ...input.emails.flatMap((email: any) => {
+      const value = String(email.value || '').trim().toLowerCase();
+      return value ? [`EMAIL:${value}`] : [];
+    }),
+  ],
+}));
+vi.mock('../services/leadPicklists', () => ({
+  getLeadPicklistOptions: vi.fn().mockResolvedValue(new Map([
+    ['source', new Set(['WEBSITE', 'REFERRAL'])],
+    ['firstCampaign', new Set(['SUMMER'])],
+    ['lastCampaign', new Set(['FOLLOW_UP'])],
+    ['leadInterest', new Set(['HOT', 'WARM', 'COLD'])],
+  ])),
+  validateLeadPicklists: (values: Record<string, unknown>, options: Map<string, Set<string>>) => {
+    for (const field of ['source', 'firstCampaign', 'lastCampaign', 'leadInterest']) {
+      const value = values[field];
+      if (value && !options.get(field)?.has(String(value))) return { field, message: 'Invalid configured picklist value' };
+    }
+    return null;
+  },
 }));
 
 import { dataAdministrationRoutes } from './dataAdministration';
@@ -140,7 +194,7 @@ beforeEach(() => {
   mocks.getObjectDefinition.mockResolvedValue({ id: 'lead-object' });
   mocks.findProject.mockResolvedValue({ id: 'project-a' });
   mocks.getFieldDefinitions.mockResolvedValue(
-    ['firstName', 'lastName', 'phone', 'source'].map((name) => ({
+    ['firstName', 'lastName', 'phone', 'email', 'source'].map((name) => ({
       name,
       required: false,
       isActive: true,
@@ -148,15 +202,19 @@ beforeEach(() => {
       fieldType: 'text',
     })),
   );
-  mocks.processLeadEnquiryBatch.mockResolvedValue([
-    { action: 'NEW_LEAD', leadId: 'lead-a', lead: { id: 'lead-a' }, enquiry: { id: 'enquiry-a' } },
-    { action: 'EXISTING_ACTIVE', leadId: 'lead-b', lead: { id: 'lead-b' }, enquiry: { id: 'enquiry-b' } },
-  ]);
+  mocks.processLeadEnquiryBatch.mockImplementation(async (inputs: unknown[]) =>
+    inputs.map((_, index) => index === 0
+      ? { action: 'NEW_LEAD', leadId: 'lead-a', lead: { id: 'lead-a' }, enquiry: { id: 'enquiry-a' } }
+      : { action: 'EXISTING_ACTIVE', leadId: 'lead-b', lead: { id: 'lead-b' }, enquiry: { id: 'enquiry-b' } }),
+  );
   mocks.bulkImportRecords.mockResolvedValue({ created: 1, errors: [] });
   mocks.createUnit.mockResolvedValue({ id: 'unit-1' });
   mocks.updateProject.mockResolvedValue({ id: 'project-a' });
   mocks.findUnit.mockResolvedValue(null);
   mocks.queryRaw.mockResolvedValue([]);
+  mocks.findLeadDuplicatesBatch.mockImplementation(async (_db: unknown, _tenantId: string, inputs: unknown[]) =>
+    inputs.map(() => []),
+  );
 });
 
 afterEach(async () => {
@@ -201,8 +259,8 @@ describe('POST /api/data/import Lead batching', () => {
     const response = await importLeads(csv);
 
     expect(response.status).toBe(201);
-    expect(mocks.processLeadEnquiryBatch).toHaveBeenCalledTimes(200);
-    expect(mocks.processLeadEnquiryBatch.mock.calls.every(([batch]) => batch.length <= 250)).toBe(true);
+    expect(mocks.processLeadEnquiryBatch).toHaveBeenCalledTimes(50);
+    expect(mocks.processLeadEnquiryBatch.mock.calls.every(([batch]) => batch.length <= 1_000)).toBe(true);
     await expect(response.json()).resolves.toMatchObject({
       success: true,
       data: { count: 50_000, linkedEnquiries: 0 },
@@ -314,6 +372,62 @@ describe('POST /api/data/import Lead batching', () => {
         ],
       },
     });
+  });
+
+  it('reports duplicate contact rows within the uploaded file and retains spreadsheet row numbers', async () => {
+    const response = await importLeads(
+      'firstName,lastName,phone,email,source\nFirst,Unique,9876543210,Sales@Example.com,WEBSITE\nSecond,Unique,(987) 654-3210,sales@example.com,REFERRAL',
+      ['firstName', 'lastName', 'phone', 'email', 'source'],
+    );
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      success: true,
+      data: {
+        count: 1,
+        errors: [{
+          row: 3,
+          duplicateFields: ['phone', 'email'],
+          error: 'This phone number and email already exist in your tenant. Duplicate also appears in this upload.',
+        }],
+        rowResults: [
+          { row: 2, status: 'success' },
+          { row: 3, status: 'failed', duplicateFields: ['phone', 'email'] },
+        ],
+      },
+    });
+    expect(mocks.processLeadEnquiryBatch).toHaveBeenCalledOnce();
+    expect(mocks.processLeadEnquiryBatch.mock.calls[0][0]).toHaveLength(1);
+  });
+
+  it('reports existing tenant duplicates without disclosing the matching lead', async () => {
+    mocks.findLeadDuplicatesBatch.mockImplementationOnce(async (_db: unknown, _tenantId: string, inputs: any[]) =>
+      inputs.map(() => [{
+        evidence: [
+          { contactKey: 'PHONE:+919876543210' },
+          { contactKey: 'EMAIL:sales@example.com' },
+        ],
+      }]),
+    );
+
+    const response = await importLeads(
+      'firstName,lastName,phone,email,source\nNew,Lead,9876543210,sales@example.com,WEBSITE',
+      ['firstName', 'lastName', 'phone', 'email', 'source'],
+    );
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      success: false,
+      code: 'DUPLICATE_LEAD',
+      data: {
+        count: 0,
+        errors: [{
+          row: 2,
+          duplicateFields: ['phone', 'email'],
+          error: 'This phone number and email already exist in your tenant.',
+        }],
+        rowResults: [{ row: 2, status: 'failed' }],
+      },
+    });
+    expect(mocks.processLeadEnquiryBatch).not.toHaveBeenCalled();
   });
 
   describe('POST /api/data/import Unit', () => {

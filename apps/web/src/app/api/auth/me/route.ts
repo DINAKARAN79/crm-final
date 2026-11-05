@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getUpstreamFailureStatus } from '@/lib/upstream-error';
 
 export const dynamic = 'force-dynamic';
 
@@ -16,6 +17,7 @@ export async function GET(request: NextRequest) {
     const response = await fetch(`${BACKEND_URL}/api/auth/me`, {
       method: 'GET',
       headers,
+      signal: AbortSignal.timeout(30_000),
     });
 
     const data = await response.json();
@@ -30,9 +32,15 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(data);
   } catch (error) {
     console.error('Auth me proxy error:', error);
+    const status = getUpstreamFailureStatus(error);
     return NextResponse.json(
-      { success: false, error: 'Unable to connect to authentication service' },
-      { status: 502 }
+      {
+        success: false,
+        error: status === 504
+          ? 'Authentication service timed out'
+          : 'Unable to connect to authentication service',
+      },
+      { status }
     );
   }
 }

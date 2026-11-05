@@ -7,13 +7,14 @@ const telephony = vi.hoisted(() => ({
   getSettings: vi.fn(),
   saveSettings: vi.fn(),
   listLogs: vi.fn(),
-  probe: vi.fn(),
+  findSettings: vi.fn(),
+  findUser: vi.fn(),
 }));
 
 vi.mock('@dct-crm/db', () => ({
   prisma: {
-    telephonySetting: { findUnique: vi.fn() },
-    user: { findMany: vi.fn() },
+    telephonySetting: { findUnique: telephony.findSettings },
+    user: { findMany: vi.fn(), findFirst: telephony.findUser },
     lead: { findMany: vi.fn() },
   },
 }));
@@ -34,13 +35,9 @@ vi.mock('../middleware/auth', () => ({
   },
 }));
 
-vi.mock('../../services/clickToCall', () => ({
-  probeTelephonyConnection: telephony.probe,
-}));
-
 vi.mock('../../services/telephonySettings', () => ({
   getTelephonySettings: telephony.getSettings,
-  listTelephonyRequestLogs: telephony.listLogs,
+  listRecentDialpadCalls: telephony.listLogs,
   saveTelephonySettings: telephony.saveSettings,
   telephonySettingsSchema: {
     parse: (value: unknown) => value,
@@ -73,7 +70,13 @@ beforeEach(() => {
   vi.clearAllMocks();
   telephony.getSettings.mockResolvedValue({ hasKey: true, keyLastFour: '1234' });
   telephony.saveSettings.mockResolvedValue({ hasKey: true, keyLastFour: '1234' });
-  telephony.probe.mockResolvedValue({ reached: true, httpStatus: 400, durationMs: 1, reason: 'Body rejected' });
+  telephony.findSettings.mockResolvedValue({
+    isActive: true,
+    dialpadUrl: 'https://bizcall.cxteletech.com/embed/dialpad',
+    autoDialOnClick: false,
+    theme: 'CRM',
+  });
+  telephony.findUser.mockResolvedValue({ phone: '+14155552671', firstName: 'Ada', lastName: 'Lovelace' });
 });
 
 afterEach(async () => {
@@ -83,16 +86,28 @@ afterEach(async () => {
 });
 
 describe('telephony settings authorization', () => {
-  it('returns 403 for non-admin users on settings and test-connection routes', async () => {
+  it('returns 403 for non-admin users on settings and own-number dialpad routes', async () => {
     const settings = await request('', 'GET', 'member');
     const update = await request('', 'PUT', 'member');
-    const test = await request('/test-connection', 'POST', 'member');
+    const open = await request('/open-dialpad-with-my-number', 'POST', 'member');
 
     expect(settings.status).toBe(403);
     expect(update.status).toBe(403);
-    expect(test.status).toBe(403);
+    expect(open.status).toBe(403);
     expect(telephony.getSettings).not.toHaveBeenCalled();
     expect(telephony.saveSettings).not.toHaveBeenCalled();
-    expect(telephony.probe).not.toHaveBeenCalled();
+    expect(telephony.findUser).not.toHaveBeenCalled();
+  });
+
+  it('opens the admin phone only through the server-built URL without a REST call', async () => {
+    const response = await request('/open-dialpad-with-my-number', 'POST', 'admin');
+    const body = await response.json() as { data: { dialpadUrl: string; apiKey?: string } };
+    const dialpadUrl = new URL(body.data.dialpadUrl);
+
+    expect(response.status).toBe(200);
+    expect(dialpadUrl.searchParams.get('userId')).toBe('test-user');
+    expect(dialpadUrl.searchParams.get('number')).toBe('+14155552671');
+    expect(dialpadUrl.searchParams.get('autocall')).toBe('false');
+    expect(body.data).not.toHaveProperty('apiKey');
   });
 });

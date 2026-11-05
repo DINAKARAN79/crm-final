@@ -119,8 +119,8 @@ interface FieldDef {
   editable: boolean;
   isActive: boolean;
   isSystemField: boolean;
-  isCustomField: boolean;
   isStandardField: boolean;
+  isCustomField: boolean;
   displayOrder: number;
   minLength?: number;
   maxLength?: number;
@@ -658,21 +658,25 @@ export default function ObjectSettingsPage() {
                             )}
                           </TableCell>
                           <TableCell className="text-right">
-                            {!field.isSystemField && !field.isStandardField && (
+                            {!field.isSystemField && (!field.isStandardField || (objectName.toLowerCase() === "lead" && field.name === "leadInterest")) && (
                               <div className="flex justify-end gap-1">
                                 <Button variant="ghost" size="sm" onClick={() => openEditDialog(field)}>
                                   <Pencil className="h-4 w-4" />
                                 </Button>
-                                <Button variant="ghost" size="sm" onClick={() => handleToggleField(field)}>
-                                  {field.isActive ? (
-                                    <EyeOff className="h-4 w-4 text-orange-500" />
-                                  ) : (
-                                    <Eye className="h-4 w-4 text-green-500" />
-                                  )}
-                                </Button>
-                                <Button variant="ghost" size="sm" onClick={() => setDeleteField(field)}>
-                                  <Trash2 className="h-4 w-4 text-destructive" />
-                                </Button>
+                                {!field.isStandardField && (
+                                  <>
+                                    <Button variant="ghost" size="sm" onClick={() => handleToggleField(field)}>
+                                      {field.isActive ? (
+                                        <EyeOff className="h-4 w-4 text-orange-500" />
+                                      ) : (
+                                        <Eye className="h-4 w-4 text-green-500" />
+                                      )}
+                                    </Button>
+                                    <Button variant="ghost" size="sm" onClick={() => setDeleteField(field)}>
+                                      <Trash2 className="h-4 w-4 text-destructive" />
+                                    </Button>
+                                  </>
+                                )}
                               </div>
                             )}
                           </TableCell>

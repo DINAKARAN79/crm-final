@@ -8,7 +8,6 @@ describe("TelephonyStatusHint", () => {
   it.each([
     ["NO_PERMISSION", "You do not have permission to place calls. Ask an admin to grant the Telephony permission."],
     ["DISABLED", "Telephony is switched off for this company."],
-    ["KEY_MISSING", "The Bizcall API key is not saved."],
     ["PERMISSION_UNAVAILABLE", "The telephony permission is not set up on this server."],
     ["DIALPAD_EMBED_BLOCKED", "The Bizcall dialpad is not allowed on this site."],
     ["INVALID_PHONE", "This phone number is not valid for calling."],
@@ -61,7 +60,6 @@ describe("TelephonyStatusHint", () => {
 describe("telephony settings navigation", () => {
   it.each([
     ["DISABLED", "bizcall-connection"],
-    ["KEY_MISSING", "bizcall-connection"],
     ["NO_PERMISSION", "agents"],
     ["PERMISSION_UNAVAILABLE", "agents"],
     ["DIALPAD_EMBED_BLOCKED", "dialpad"],

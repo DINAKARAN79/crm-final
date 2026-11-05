@@ -13,17 +13,25 @@ import {
   leadScopeClause,
 } from '../services/recordAccess';
 import {
+  leadDuplicateInputForEnquiry,
   processLeadEnquiryBatch,
   sourceEnumValue,
   type LeadEnquiryInput,
 } from '../services/enquiryProcessing';
+import {
+  duplicateLeadFields,
+  duplicateLeadMessage,
+  findLeadDuplicatesBatch,
+  leadDuplicateContactKeys,
+} from '../services/leadDuplicateDetection';
+import { getLeadPicklistOptions, validateLeadPicklists } from '../services/leadPicklists';
 import { importUserRows } from '../services/userImport';
 import { ensureUserObjectOnce } from '../services/userObject';
 
 const router = Router();
 router.use(authenticate);
-const MAX_IMPORT_RECORDS = 50_000;
-const LEAD_IMPORT_BATCH_SIZE = 250;
+const MAX_IMPORT_RECORDS = 100_000;
+const LEAD_IMPORT_BATCH_SIZE = 1_000;
 const STANDARD_IMPORT_BATCH_SIZE = 500;
 
 const STANDARD_EXPORT_MODELS: Record<string, string> = {
@@ -438,6 +446,7 @@ router.post('/import', requirePermission('DATA_IMPORT'), async (req: AuthRequest
     if (objectName.trim().toLowerCase() === 'user') await ensureUserObjectOnce(req.tenantId!);
     const object = await getObjectDefinition(req.tenantId!, objectName.trim());
     if (!object) return res.status(404).json({ success: false, error: 'Object not found' });
+    const normalizedObjectName = String(object?.name || objectName.trim()).trim().toLowerCase();
     const availableFields = (await getFieldDefinitions(req.tenantId!, object.id) as Array<{ name: string; label?: string; required: boolean; isActive: boolean; isSystemField: boolean }>).filter((field) => field.isActive && !field.isSystemField);
     const availableNames = new Set(availableFields.map((field) => field.name));
     const invalidFields = fields.filter((field) => !availableNames.has(field));
@@ -462,7 +471,7 @@ router.post('/import', requirePermission('DATA_IMPORT'), async (req: AuthRequest
     if (missingCsvFields.length > 0) {
       return res.status(400).json({ success: false, error: `CSV is missing selected fields: ${missingCsvFields.join(', ')}` });
     }
-    if (object.name.toLowerCase() === 'user') {
+    if (normalizedObjectName === 'user') {
       const userImport = await importUserRows({
         tenantId: req.tenantId!,
         actorId: req.user!.id,
@@ -510,6 +519,7 @@ router.post('/import', requirePermission('DATA_IMPORT'), async (req: AuthRequest
       const fieldTypes = new Map(availableFields.map((field: any) => [field.name, field.fieldType]));
 
       if (standardConfig.model === 'lead') {
+        const leadPicklistOptions = await getLeadPicklistOptions(req.tenantId!);
         const leadFields = new Set(Object.keys(leadCreateSchema.shape));
         const enquiryFields = new Set([
           'secondaryPhone', 'tertiaryPhone', 'secondaryEmail', 'tertiaryEmail',
@@ -617,6 +627,34 @@ router.post('/import', requirePermission('DATA_IMPORT'), async (req: AuthRequest
               },
             });
           }
+          const picklistError = validateLeadPicklists(leadResult.data, leadPicklistOptions, { validateRequired: true });
+          if (picklistError) {
+            const error = `Import failed on row ${index + 2}: ${picklistError.message}`;
+            const rowErrors = records.map((_, rowIndex) => ({
+              index: rowIndex,
+              row: rowIndex + 2,
+              error: rowIndex === index
+                ? error
+                : `Not imported because validation failed on row ${index + 2}.`,
+            }));
+            return res.status(400).json({
+              success: false,
+              error,
+              row: index + 2,
+              fieldErrors: [picklistError],
+              data: {
+                count: 0,
+                linkedEnquiries: 0,
+                errors: rowErrors,
+                rowResults: rowErrors.map(({ index: rowIndex, error: rowError }) => ({
+                  index: rowIndex,
+                  row: rowIndex + 2,
+                  status: 'failed',
+                  error: rowError,
+                })),
+              },
+            });
+          }
           inputs.push({
             tenantId: req.tenantId!,
             userId: req.user!.id,
@@ -650,32 +688,73 @@ router.post('/import', requirePermission('DATA_IMPORT'), async (req: AuthRequest
         }
         let created = 0;
         let linkedEnquiries = 0;
-        const errors: { index: number; error: string }[] = [];
-        const rowResults: { index: number; status: 'success' | 'failed'; error?: string }[] = [];
-        const batchSize = inputs.length > 1000 ? LEAD_IMPORT_BATCH_SIZE : inputs.length;
-        for (let start = 0; start < inputs.length; start += batchSize) {
+        const errors: { index: number; row: number; error: string; duplicateFields?: string[] }[] = [];
+        const rowResults: { index: number; row: number; status: 'success' | 'failed'; error?: string; duplicateFields?: string[] }[] = [];
+        const seenUploadContacts = new Set<string>();
+        for (let start = 0; start < inputs.length; start += LEAD_IMPORT_BATCH_SIZE) {
+          const batchInputs = inputs.slice(start, start + LEAD_IMPORT_BATCH_SIZE);
+          const duplicateMatches = await findLeadDuplicatesBatch(
+            prisma,
+            req.tenantId!,
+            batchInputs.map(leadDuplicateInputForEnquiry),
+          );
+          const validRows: Array<{ index: number; input: LeadEnquiryInput }> = [];
+          for (let offset = 0; offset < batchInputs.length; offset += 1) {
+            const index = start + offset;
+            const keys = leadDuplicateContactKeys(leadDuplicateInputForEnquiry(batchInputs[offset]));
+            const duplicateFields = new Set(duplicateLeadFields(duplicateMatches[offset]));
+            let uploadedDuplicate = false;
+            for (const key of keys) {
+              const field: 'phone' | 'email' = key.startsWith('PHONE:') ? 'phone' : 'email';
+              if (seenUploadContacts.has(key)) {
+                duplicateFields.add(field);
+                uploadedDuplicate = true;
+              }
+              seenUploadContacts.add(key);
+            }
+            if (duplicateFields.size) {
+              const orderedFields: Array<'phone' | 'email'> = ['phone', 'email'];
+              const fields = orderedFields.filter((field) => duplicateFields.has(field));
+              const reason = `${duplicateLeadMessage(fields)}${uploadedDuplicate ? ' Duplicate also appears in this upload.' : ''}`;
+              errors.push({ index, row: index + 2, error: reason, duplicateFields: fields });
+              rowResults.push({ index, row: index + 2, status: 'failed', error: reason, duplicateFields: fields });
+            } else {
+              validRows.push({ index, input: batchInputs[offset] });
+            }
+          }
+          if (!validRows.length) continue;
           try {
-            const results = await processLeadEnquiryBatch(inputs.slice(start, start + batchSize));
+            const results = await processLeadEnquiryBatch(
+              validRows.map(({ input }) => input),
+              { rejectDuplicates: true },
+            );
             created += results.filter((result) => result.action === 'NEW_LEAD').length;
             linkedEnquiries += results.filter((result) => result.action !== 'NEW_LEAD').length;
-            results.forEach((_, offset) => rowResults.push({ index: start + offset, status: 'success' }));
+            results.forEach((_, offset) => {
+              const index = validRows[offset].index;
+              rowResults.push({ index, row: index + 2, status: 'success' });
+            });
           } catch (error: any) {
             const batchRowIndex = typeof error?.rowIndex === 'number'
-              ? start + error.rowIndex
-              : start;
+              ? validRows[error.rowIndex]?.index ?? validRows[0].index
+              : validRows[0].index;
             const row = batchRowIndex + 2;
-            const detail = error?.message === 'DUPLICATE_CONFLICT' || error?.message === 'LEAD_MISMATCH'
-              ? 'Multiple or changed duplicate matches require review.'
-              : error?.validationErrors?.[0]?.message || error?.message || 'Invalid row';
+            const duplicateFields = Array.isArray(error?.duplicateFields)
+              ? error.duplicateFields.filter((field: unknown) => field === 'phone' || field === 'email')
+              : [];
+            const isDuplicate = error?.code === 'DUPLICATE_LEAD' || error?.message === 'DUPLICATE_LEAD';
+            const detail = isDuplicate
+              ? duplicateLeadMessage(duplicateFields)
+              : error?.message === 'DUPLICATE_CONFLICT' || error?.message === 'LEAD_MISMATCH'
+                ? 'Multiple or changed duplicate matches require review.'
+                : error?.validationErrors?.[0]?.message || error?.message || 'Invalid row';
             const message = `Import stopped at row ${row}: ${detail}`;
-            for (let index = start; index < records.length; index += 1) {
+            for (const { index } of validRows) {
               const rowError = index === batchRowIndex
                 ? message
-                : index < start + batchSize
-                  ? `Not imported because its transaction batch was rolled back after row ${row} failed.`
-                  : `Not imported because processing stopped after row ${row} failed.`;
-              errors.push({ index, error: rowError });
-              rowResults.push({ index, status: 'failed', error: rowError });
+                : `Not imported because its transaction batch was rolled back after row ${row} failed.`;
+              errors.push({ index, row: index + 2, error: rowError, ...(isDuplicate ? { duplicateFields } : {}) });
+              rowResults.push({ index, row: index + 2, status: 'failed', error: rowError, ...(isDuplicate ? { duplicateFields } : {}) });
             }
             if (created + linkedEnquiries === 0) {
               return res.status(error?.message === 'DUPLICATE_CONFLICT' || error?.message === 'LEAD_MISMATCH' ? 409 : 400).json({
@@ -687,8 +766,17 @@ router.post('/import', requirePermission('DATA_IMPORT'), async (req: AuthRequest
                 data: { count: 0, linkedEnquiries: 0, errors, rowResults },
               });
             }
-            break;
           }
+        }
+        rowResults.sort((left, right) => left.index - right.index);
+        errors.sort((left, right) => left.index - right.index);
+        if (created + linkedEnquiries === 0 && errors.length) {
+          return res.status(errors.some((item) => item.duplicateFields?.length) ? 409 : 400).json({
+            success: false,
+            code: errors.some((item) => item.duplicateFields?.length) ? 'DUPLICATE_LEAD' : undefined,
+            error: errors[0].error,
+            data: { count: 0, linkedEnquiries: 0, errors, rowResults },
+          });
         }
         return res.status(201).json({
           success: true,
@@ -784,6 +872,24 @@ router.post('/import', requirePermission('DATA_IMPORT'), async (req: AuthRequest
     console.error('Data import error:', error);
     res.status(400).json({ success: false, error: error.message || 'Import failed' });
   }
+});
+
+router.post('/update', requirePermission('DATA_UPDATE'), async (req: AuthRequest, res: Response) => {
+  const { objectName, fields, csv } = req.body ?? {};
+  if (typeof objectName !== 'string' || !objectName.trim()) {
+    return res.status(400).json({ success: false, error: 'objectName is required' });
+  }
+  if (!Array.isArray(fields) || fields.length === 0) {
+    return res.status(400).json({ success: false, error: 'At least one field is required to preview an update' });
+  }
+  if (typeof csv !== 'string' || !csv.trim()) {
+    return res.status(400).json({ success: false, error: 'CSV content is required' });
+  }
+  return res.status(501).json({
+    success: false,
+    error: 'Bulk data update is not enabled in this build. The page is available for Admin access, but the preview/apply workflow must be implemented with the shared object validation layer before it writes records.',
+    data: { objectName, fieldCount: fields.length },
+  });
 });
 
 router.get('/export/:objectName', requirePermission('DATA_EXPORT'), async (req: AuthRequest, res: Response) => {

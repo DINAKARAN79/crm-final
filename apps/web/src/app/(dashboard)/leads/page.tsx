@@ -7,7 +7,7 @@ import { useAuth } from "@/contexts/auth-context";
 import { useRouter } from "next/navigation";
 
 import { impersonationMeta, leadApi } from "@/lib/api";
-import { clickToCallToast } from "@/lib/click-to-call";
+import { dialpadCallToast } from "@/lib/telephony-call";
 import { requestLeadCall } from "@/lib/telephony-client";
 import { maskTelephonyNumber, useTelephonyActive, useTelephonyNumberMasking, useTelephonyReasonCode } from "@/lib/telephony-client";
 import { isValidTelephonyNumber } from "@/lib/telephony-navigation";
@@ -47,6 +47,7 @@ function mapApiLeadToLead(apiLead: any, maskNumbers: boolean): Lead {
     countryCode: apiLead.countryCode || null,
     phoneIsValid: isValidTelephonyNumber(apiLead.phone, apiLead.countryCode),
     source: apiLead.source || "",
+    leadInterest: apiLead.leadInterest || "",
     status: statusLower,
     statusLabel: apiLead.statusLabel || statusLower.replaceAll("_", " "),
     rating: apiLead.rating || "",
@@ -103,7 +104,7 @@ export default function LeadsPage() {
       phoneField: "phone",
       leadName: [lead.firstName, lead.lastName].filter(Boolean).join(" ") || lead.company || lead.leadNumber,
     });
-    const notice = clickToCallToast(result, Boolean(isAdmin || isSuperAdmin));
+    const notice = dialpadCallToast(result, Boolean(isAdmin || isSuperAdmin));
     toast({
       title: notice.title,
       description: notice.description,

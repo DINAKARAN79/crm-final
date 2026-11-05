@@ -52,6 +52,7 @@ vi.mock('@/contexts/auth-context', () => ({
 }));
 
 vi.mock('@/lib/api', () => ({
+  impersonationMeta: vi.fn(() => null),
   analyticsApi: {
     getLeads: vi.fn().mockResolvedValue({ data: { data: { total: 0 } } }),
   },

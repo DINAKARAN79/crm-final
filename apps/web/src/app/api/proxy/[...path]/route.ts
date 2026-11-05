@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getUpstreamFailureStatus } from '@/lib/upstream-error';
 
 export const dynamic = 'force-dynamic';
 
@@ -114,6 +115,18 @@ async function proxyRequest(
   return res;
 }
 
+function proxyFailure(error: unknown, method: string) {
+  console.error(`Proxy ${method} error:`, error);
+  const status = getUpstreamFailureStatus(error);
+  return NextResponse.json(
+    {
+      success: false,
+      error: status === 504 ? 'Backend service timed out' : 'Unable to connect to backend service',
+    },
+    { status }
+  );
+}
+
 export async function GET(
   request: NextRequest,
   { params }: { params: { path: string[] } }
@@ -122,11 +135,7 @@ export async function GET(
     const path = params.path.join('/');
     return await proxyRequest('GET', path, request);
   } catch (error) {
-    console.error('Proxy GET error:', error);
-    return NextResponse.json(
-      { success: false, error: 'Unable to connect to backend service' },
-      { status: 502 }
-    );
+    return proxyFailure(error, 'GET');
   }
 }
 
@@ -138,11 +147,7 @@ export async function POST(
     const path = params.path.join('/');
     return await proxyRequest('POST', path, request);
   } catch (error) {
-    console.error('Proxy POST error:', error);
-    return NextResponse.json(
-      { success: false, error: 'Unable to connect to backend service' },
-      { status: 502 }
-    );
+    return proxyFailure(error, 'POST');
   }
 }
 
@@ -154,11 +159,7 @@ export async function PUT(
     const path = params.path.join('/');
     return await proxyRequest('PUT', path, request);
   } catch (error) {
-    console.error('Proxy PUT error:', error);
-    return NextResponse.json(
-      { success: false, error: 'Unable to connect to backend service' },
-      { status: 502 }
-    );
+    return proxyFailure(error, 'PUT');
   }
 }
 
@@ -170,11 +171,7 @@ export async function DELETE(
     const path = params.path.join('/');
     return await proxyRequest('DELETE', path, request);
   } catch (error) {
-    console.error('Proxy DELETE error:', error);
-    return NextResponse.json(
-      { success: false, error: 'Unable to connect to backend service' },
-      { status: 502 }
-    );
+    return proxyFailure(error, 'DELETE');
   }
 }
 
@@ -186,10 +183,6 @@ export async function PATCH(
     const path = params.path.join('/');
     return await proxyRequest('PATCH', path, request);
   } catch (error) {
-    console.error('Proxy PATCH error:', error);
-    return NextResponse.json(
-      { success: false, error: 'Unable to connect to backend service' },
-      { status: 502 }
-    );
+    return proxyFailure(error, 'PATCH');
   }
 }

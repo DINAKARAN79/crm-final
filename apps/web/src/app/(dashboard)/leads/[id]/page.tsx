@@ -31,7 +31,7 @@ import { useParams, useRouter } from "next/navigation";
 import { useAuth } from "@/contexts/auth-context";
 
 import { impersonationMeta, leadApi, siteVisitApi, activityApi, callDetailsApi, followUpApi, objectManagerApi, projectApi, enquiryApi } from "@/lib/api";
-import { clickToCallToast, type ClickToCallField } from "@/lib/click-to-call";
+import { dialpadCallToast, type DialpadCallField } from "@/lib/telephony-call";
 import { requestLeadCall } from "@/lib/telephony-client";
 import { maskTelephonyNumber, useTelephonyActive, useTelephonyNumberMasking, useTelephonyReasonCode } from "@/lib/telephony-client";
 import { TelephonyStatusHint } from "@/components/crm/telephony-status-hint";
@@ -162,6 +162,9 @@ interface LeadData {
   annualRevenue?: number;
   numberOfEmployees?: number;
   source: string;
+  firstCampaign?: string | null;
+  lastCampaign?: string | null;
+  leadInterest?: string | null;
   status: string;
   statusId?: string;
   statusLabel?: string;
@@ -289,6 +292,9 @@ const LEAD_EDITABLE_FIELDS = [
   "annualRevenue",
   "numberOfEmployees",
   "source",
+  "firstCampaign",
+  "lastCampaign",
+  "leadInterest",
   "status",
   "rating",
   "description",
@@ -383,7 +389,7 @@ export default function LeadDetailPage() {
     ? "Choose a future date and time."
     : "";
   const [callDialogOpen, setCallDialogOpen] = React.useState(false);
-  const [callingField, setCallingField] = React.useState<ClickToCallField | null>(null);
+  const [callingField, setCallingField] = React.useState<DialpadCallField | null>(null);
   const [callType, setCallType] = React.useState<"INBOUND" | "OUTBOUND">("OUTBOUND");
   const [callStartAt, setCallStartAt] = React.useState("");
   const [callEndAt, setCallEndAt] = React.useState("");
@@ -1828,7 +1834,7 @@ export default function LeadDetailPage() {
     if (!telephonyActive) return telephonyReasonCode;
     return isValidTelephonyNumber(phone, countryCode) ? telephonyReasonCode : "INVALID_PHONE";
   };
-  const placeCall = async (phoneField: ClickToCallField) => {
+  const placeCall = async (phoneField: DialpadCallField) => {
     if (callingField) return;
     setCallingField(phoneField);
     const result = await requestLeadCall({
@@ -1836,7 +1842,7 @@ export default function LeadDetailPage() {
       phoneField,
       leadName: leadDisplayName || lead.company || lead.leadNumber || "Lead",
     });
-    const notice = clickToCallToast(result, Boolean(isAdmin || isSuperAdmin));
+    const notice = dialpadCallToast(result, Boolean(isAdmin || isSuperAdmin));
     toast({
       title: notice.title,
       description: notice.description,
@@ -1847,16 +1853,11 @@ export default function LeadDetailPage() {
         </ToastAction>
       ) : undefined,
     });
-    const updatedLeadStatus = result.leadStatus;
-    if (updatedLeadStatus) {
-      setLead((current) => current ? {
-        ...current,
-        status: updatedLeadStatus as typeof current.status,
-        statusLabel: result.statusChanged ? getLeadStatusLabel(updatedLeadStatus) : current.statusLabel,
-      } : current);
+    if (result.ok) {
+      void fetchLead();
+      notifyLeadListUpdated();
     }
     if (result.callDetailId) void fetchCallDetails();
-    if (result.statusChanged) notifyLeadListUpdated();
     setCallingField(null);
   };
   const leadProjectOptions = lead.project && !projects.some((project) => project.id === lead.project?.id)

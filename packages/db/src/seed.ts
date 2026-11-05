@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'crypto';
-import { PrismaClient, LeadStatus, LeadSource, SiteVisitStatus } from '@prisma/client';
+import { PrismaClient, LeadStatus, SiteVisitStatus } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 
 const prisma = new PrismaClient();
@@ -341,7 +341,7 @@ async function main() {
   }
 
   const leadStatuses = [LeadStatus.NEW, LeadStatus.INCOMING, LeadStatus.PROSPECT, LeadStatus.SITE_VISIT_SCHEDULED, LeadStatus.SITE_VISIT_HAPPENED, LeadStatus.LOST];
-  const leadSources = [LeadSource.WEBSITE, LeadSource.REFERRAL, LeadSource.COLD_CALL, LeadSource.ADVERTISEMENT, LeadSource.WALK_IN, LeadSource.PORTAL, LeadSource.INSTAGRAM];
+  const leadSources = ['WEBSITE', 'REFERRAL', 'COLD_CALL', 'ADVERTISEMENT', 'WALK_IN', 'PORTAL', 'INSTAGRAM'];
   const firstNames = ['Vikram', 'Sunita', 'Arjun', 'Kavita', 'Rohit', 'Meera', 'Sanjay', 'Pooja', 'Manoj', 'Anita', 'Deepak', 'Sonia', 'Raj', 'Nisha', 'Vikas', 'Ritu', 'Suresh', 'Geeta', 'Ashok', 'Suman'];
   const lastNames = ['Singh', 'Verma', 'Reddy', 'Iyer', 'Mishra', 'Das', 'Bose', 'Joshi', 'Nair', 'Tiwari', 'Gupta', 'Malhotra', 'Chopra', 'Kapoor', 'Mehta', 'Shah', 'Rao', 'Menon', 'Chatterjee', 'Bhat'];
   const leadOwners = [salesExec1.id, salesExec2.id];

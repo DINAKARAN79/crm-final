@@ -16,14 +16,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
 
-const MAX_IMPORT_RECORDS = 50_000;
+const MAX_IMPORT_RECORDS = 100_000;
 const PREVIEW_ROW_LIMIT = 100;
 
-export default function DataOperationPage({ mode }: { mode: "import" | "export" }) {
+export default function DataOperationPage({ mode }: { mode: "import" | "update" | "export" }) {
   const { hasEffectivePermission, hasFullAccess } = useAuth();
   const { toast } = useToast();
-  const permission = mode === "import" ? "DATA_IMPORT" : "DATA_EXPORT";
+  const permission = mode === "import" ? "DATA_IMPORT" : mode === "update" ? "DATA_UPDATE" : "DATA_EXPORT";
   const allowed = hasFullAccess || hasEffectivePermission(permission);
+  const isUpdateMode = mode === "update";
   const [objects, setObjects] = useState<{ name: string; label: string; isActive?: boolean }[]>([]);
   const [fields, setFields] = useState<{ name: string; label: string; required?: boolean }[]>([]);
   const [objectName, setObjectName] = useState("");
@@ -132,7 +133,9 @@ export default function DataOperationPage({ mode }: { mode: "import" | "export" 
       setLoading(true);
       setImportFeedback(null);
       setImportRows([]);
-      const response = await dataAdministrationApi.import(objectName, mappedFields, serializeCsv(mappedRows));
+      const response = isUpdateMode
+        ? await dataAdministrationApi.update(objectName, { fields: mappedFields, csv: serializeCsv(mappedRows) })
+        : await dataAdministrationApi.import(objectName, mappedFields, serializeCsv(mappedRows));
       const outcome = summarizeImportResult(objectName, response.data);
       setImportFeedback(outcome);
       applyImportRows(response.data, submittedRows, submittedHeaders, submittedHasHeaderRow);
@@ -181,7 +184,7 @@ export default function DataOperationPage({ mode }: { mode: "import" | "export" 
     return <div className="rounded-lg border p-6"><h2 className="font-medium">Access required</h2><p className="mt-2 text-sm text-muted-foreground">Ask an administrator to assign the {permission} permission through a Permission Set.</p></div>;
   }
 
-  if (mode === "import") {
+  if (mode === "import" || mode === "update") {
     const previewHeaders = csvColumns;
     const previewRows = csvDataRows;
     const mappedHeaders = mappedFields.length;
@@ -194,12 +197,15 @@ export default function DataOperationPage({ mode }: { mode: "import" | "export" 
       <div className="flex min-h-12 items-center justify-between bg-[#07356c] px-5 py-2 text-white">
         <div className="flex items-center gap-3">
           <span className="grid h-7 w-7 place-items-center rounded bg-white/15"><FileSpreadsheet className="h-4 w-4" /></span>
-          <div className="text-sm font-semibold tracking-wide">Data Import</div>
+          <div className="text-sm font-semibold tracking-wide">{isUpdateMode ? "Data Update" : "Data Import"}</div>
         </div>
-        <span className="hidden text-xs text-blue-100 sm:block">Import CSV records into your CRM</span>
+        <span className="hidden text-xs text-blue-100 sm:block">{isUpdateMode ? "Review and apply bulk updates to existing CRM records" : "Import CSV records into your CRM"}</span>
       </div>
 
       <div className="space-y-3 p-3 sm:p-4">
+        {isUpdateMode && <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          Bulk updates are preview-first and must match the same validation rules as the normal create/update APIs. Lead status is excluded from this tool.
+        </div>}
         {importFeedback && <div role="status" aria-live="polite" className={`flex items-start gap-3 rounded-xl border px-4 py-3 text-sm ${
           importFeedback.kind === "success" ? "border-emerald-200 bg-emerald-50 text-emerald-900"
             : importFeedback.kind === "partial" ? "border-amber-200 bg-amber-50 text-amber-900"
@@ -266,8 +272,8 @@ export default function DataOperationPage({ mode }: { mode: "import" | "export" 
         <div className="grid gap-3 xl:grid-cols-2">
           <section className="rounded-2xl bg-white p-4 shadow-sm">
             <div className="mb-4">
-              <h2 className="text-sm font-semibold text-slate-700">Configure Import</h2>
-              <p className="mt-1 text-xs text-slate-500">Choose the CRM object and provide your CSV data.</p>
+              <h2 className="text-sm font-semibold text-slate-700">{isUpdateMode ? "Configure Update" : "Configure Import"}</h2>
+              <p className="mt-1 text-xs text-slate-500">{isUpdateMode ? "Choose the CRM object and upload a CSV that updates existing records." : "Choose the CRM object and provide your CSV data."}</p>
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
@@ -362,7 +368,7 @@ export default function DataOperationPage({ mode }: { mode: "import" | "export" 
         <section className="flex flex-col gap-4 rounded-2xl bg-white p-3 shadow-sm lg:flex-row lg:items-center lg:justify-between">
           <div className="flex flex-wrap items-center gap-2">
             <Button onClick={runImport} disabled={importDisabled} className="h-9 rounded-full bg-blue-600 px-5 text-xs hover:bg-blue-700">
-              <Upload className="h-4 w-4" />{loading ? "Importing..." : "Run Import"}
+              <Upload className="h-4 w-4" />{loading ? (isUpdateMode ? "Updating..." : "Importing...") : (isUpdateMode ? "Run Update" : "Run Import")}
             </Button>
             <span className="text-[11px] text-slate-500">Up to {MAX_IMPORT_RECORDS.toLocaleString()} records per import</span>
           </div>

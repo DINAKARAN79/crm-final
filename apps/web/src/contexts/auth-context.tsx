@@ -8,9 +8,11 @@ import {
   clearSessionToken,
   getSessionLastActivity,
   getSessionToken,
+  getSessionTokenExpiry,
   impersonationApi,
   impersonationMeta,
   recordSessionActivity,
+  refreshSessionToken,
   SESSION_IDLE_TIMEOUT_MS,
   leadApi,
 } from "@/lib/api";
@@ -80,8 +82,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [tenant, setTenant] = React.useState<{ id: string; name: string; slug: string; country?: string | null } | null>(null);
   const [leadStatuses, setLeadStatuses] = React.useState<LeadStatusOption[]>([]);
   const [isLoading, setIsLoading] = React.useState(true);
+  const authRetryTimer = React.useRef<number | null>(null);
+  const loadUserRef = React.useRef<() => Promise<void>>(async () => undefined);
 
   const loadUser = React.useCallback(async () => {
+    let retrying = false;
     try {
       const res = await authApi.me();
       if (res.data.success && res.data.data) {
@@ -107,23 +112,74 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setIsAdmin(Boolean(data.user?.isSuperAdmin || data.profile?.isAdmin));
       }
     } catch (error) {
-      // Not authenticated - will redirect to login via API interceptor
+      const status = typeof error === 'object' && error && 'response' in error
+        ? (error as { response?: { status?: number } }).response?.status
+        : undefined;
+      if (getSessionToken() && (status === undefined || status === 409 || status === 429 || status >= 500)) {
+        retrying = true;
+        if (authRetryTimer.current !== null) window.clearTimeout(authRetryTimer.current);
+        authRetryTimer.current = window.setTimeout(() => {
+          authRetryTimer.current = null;
+          void loadUserRef.current();
+        }, 5_000);
+      }
     } finally {
-      setIsLoading(false);
+      if (!retrying) setIsLoading(false);
     }
   }, []);
+  loadUserRef.current = loadUser;
 
   React.useEffect(() => {
     loadUser();
   }, [loadUser]);
 
+  React.useEffect(() => () => {
+    if (authRetryTimer.current !== null) window.clearTimeout(authRetryTimer.current);
+  }, []);
+
+  React.useEffect(() => {
+    if (!user || !getSessionToken()) return;
+
+    let active = true;
+    let timer: number | undefined;
+    let consecutiveFailures = 0;
+    const scheduleRefresh = () => {
+      if (!active || !getSessionToken()) return;
+      const expiry = getSessionTokenExpiry();
+      const delay = expiry === null ? 0 : Math.max(0, expiry - Date.now() - 60_000);
+      timer = window.setTimeout(() => {
+        void refreshBeforeExpiry();
+      }, delay);
+    };
+    const refreshBeforeExpiry = async () => {
+      try {
+        await refreshSessionToken();
+        consecutiveFailures = 0;
+        scheduleRefresh();
+      } catch (error) {
+        const status = typeof error === "object" && error && "response" in error
+          ? (error as { response?: { status?: number } }).response?.status
+          : undefined;
+        if (status === 401) return;
+        consecutiveFailures += 1;
+        const retryDelay = Math.min(5_000 * (2 ** (consecutiveFailures - 1)), 60_000);
+        timer = window.setTimeout(() => {
+          void refreshBeforeExpiry();
+        }, retryDelay);
+      }
+    };
+
+    scheduleRefresh();
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [user]);
+
   React.useEffect(() => {
     if (!user || !getSessionToken()) return;
 
     let idleTimer: ReturnType<typeof setTimeout>;
-    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
-    let lastRefreshAt = Date.now();
-
     const endSessionIfIdle = () => {
       const remaining = SESSION_IDLE_TIMEOUT_MS - (Date.now() - getSessionLastActivity());
       if (remaining <= 0) {
@@ -147,19 +203,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
       clearTimeout(idleTimer);
       idleTimer = setTimeout(endSessionIfIdle, SESSION_IDLE_TIMEOUT_MS);
-
-      if (!refreshTimer) {
-        const refreshDelay = Math.max(0, 15_000 - (Date.now() - lastRefreshAt));
-        refreshTimer = setTimeout(() => {
-          refreshTimer = undefined;
-          if (Date.now() - getSessionLastActivity() < SESSION_IDLE_TIMEOUT_MS) {
-            lastRefreshAt = Date.now();
-            void authApi.refresh().catch((error) => {
-              console.error("Unable to refresh the active CRM session", error);
-            });
-          }
-        }, refreshDelay);
-      }
     };
 
     const handleVisibilityChange = () => {
@@ -179,22 +222,39 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
     let heartbeatTimer: number | undefined;
-    const sendHeartbeat = () => {
+    const scheduleHeartbeat = (delayMs: number) => {
       if (document.visibilityState !== "visible") return;
-      void authApi.heartbeat().catch(() => undefined);
+      if (heartbeatTimer) window.clearTimeout(heartbeatTimer);
+      heartbeatTimer = window.setTimeout(() => {
+        void sendHeartbeat();
+      }, delayMs);
+    };
+    const sendHeartbeat = async () => {
+      if (document.visibilityState !== "visible") return;
+      try {
+        const response = await authApi.heartbeat();
+        const nextInMs = Number(response.data?.data?.nextInMs);
+        scheduleHeartbeat(
+          Number.isFinite(nextInMs) && nextInMs >= 15_000 && nextInMs <= 120_000
+            ? nextInMs
+            : 30_000,
+        );
+      } catch {
+        scheduleHeartbeat(30_000);
+      }
     };
     const armHeartbeat = () => {
-      if (heartbeatTimer) window.clearInterval(heartbeatTimer);
+      if (heartbeatTimer) window.clearTimeout(heartbeatTimer);
       if (document.visibilityState !== "visible") return;
-      sendHeartbeat();
-      heartbeatTimer = window.setInterval(sendHeartbeat, 30_000);
+      heartbeatTimer = undefined;
+      void sendHeartbeat();
     };
     const pauseHeartbeat = () => {
       if (document.visibilityState === "visible") {
         armHeartbeat();
         return;
       }
-      if (heartbeatTimer) window.clearInterval(heartbeatTimer);
+      if (heartbeatTimer) window.clearTimeout(heartbeatTimer);
       heartbeatTimer = undefined;
     };
     const sendCloseBeacon = () => {
@@ -209,7 +269,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     return () => {
       clearTimeout(idleTimer);
-      if (refreshTimer) clearTimeout(refreshTimer);
       window.removeEventListener("pointerdown", handleActivity);
       window.removeEventListener("mousemove", handleActivity);
       window.removeEventListener("keydown", handleActivity);

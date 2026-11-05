@@ -2,8 +2,6 @@ import { normalizeUserPhone } from "@dct-crm/shared";
 
 const telephonySettingsHashes: Record<string, string> = {
   DISABLED: "bizcall-connection",
-  KEY_MISSING: "bizcall-connection",
-  KEY_UNREADABLE: "bizcall-connection",
   NOT_CONFIGURED: "bizcall-connection",
   PERMISSION_UNAVAILABLE: "agents",
   NO_PERMISSION: "agents",
@@ -13,7 +11,6 @@ const telephonySettingsHashes: Record<string, string> = {
   EMBED_BLOCKED: "dialpad",
   IFRAME_BLOCKED: "dialpad",
   TELEPHONY_NOT_CONFIGURED: "bizcall-connection",
-  TELEPHONY_KEY_MISSING: "bizcall-connection",
 };
 
 export function getTelephonySettingsHash(reasonCode: string) {

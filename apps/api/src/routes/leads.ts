@@ -49,9 +49,12 @@ import { appendLeadProcessNote } from '../services/leadNotes';
 import { ensureProspectLeadFields, type ProspectLeadDetails } from '../services/prospectLeadFields';
 import { ensureSiteVisitScheduleFields } from '../services/siteVisitScheduleFields';
 import {
+  duplicateLeadFields,
+  duplicateLeadMessage,
   findLeadDuplicates,
   validateLeadContactInput,
 } from '../services/leadDuplicateDetection';
+import { getLeadPicklistOptions, validateLeadPicklists } from '../services/leadPicklists';
 import { z } from 'zod';
 import { decorateLeadStatus, decorateLeads, getLeadStatusSettings, isLeadStatusEnabled } from '../services/leadStatusSettings';
 import { withImpersonatorNames } from '../services/impersonation';
@@ -247,6 +250,17 @@ function isPhoneUniqueViolation(error: any): boolean {
   if (Array.isArray(target)) return target.includes('phone');
   if (typeof target === 'string') return target.includes('phone');
   return false;
+}
+
+function uniqueLeadContactFields(error: any): Array<'phone' | 'email'> {
+  if (error?.code !== 'P2002') return [];
+  const target = Array.isArray(error?.meta?.target)
+    ? error.meta.target.join(',')
+    : String(error?.meta?.target || '');
+  const fields: Array<'phone' | 'email'> = [];
+  if (/normalizedPhone|phone/i.test(target)) fields.push('phone');
+  if (/normalizedEmail|email/i.test(target)) fields.push('email');
+  return fields;
 }
 
 type LeadDeletionStep =
@@ -875,6 +889,23 @@ router.post('/', authorize('Lead', 'create'), async (req: AuthRequest, res: Resp
       ...leadInput,
       source: sourceEnumValue(incomingSource),
     });
+    const picklistError = validateLeadPicklists(
+      {
+        source: data.source,
+        firstCampaign: data.firstCampaign,
+        lastCampaign: data.lastCampaign,
+        leadInterest: data.leadInterest,
+      },
+      await getLeadPicklistOptions(req.tenantId!),
+      { validateRequired: true },
+    );
+    if (picklistError) {
+      return res.status(400).json({
+        success: false,
+        error: picklistError.message,
+        fieldErrors: [picklistError],
+      });
+    }
     const initialStatus = data.status || 'NEW';
     if (!(await isLeadStatusEnabled(req.tenantId!, initialStatus))) {
       return res.status(400).json({ success: false, error: `Lead status ${leadStatusFromId(String(requestedStatus)) || initialStatus} is disabled for this company` });
@@ -967,7 +998,7 @@ router.post('/', authorize('Lead', 'create'), async (req: AuthRequest, res: Resp
             notes: metadata.siteVisit.notes,
           }
         : undefined,
-    });
+    }, { rejectDuplicates: !metadata.linkToLeadId });
     if (result.action === 'DUPLICATE_CONFLICT') {
       const leadIds = await getAccessibleDuplicateLeadIds(req, result.leadIds);
       return res.status(409).json({
@@ -1042,8 +1073,33 @@ router.post('/', authorize('Lead', 'create'), async (req: AuthRequest, res: Resp
         fieldErrors: error.validationErrors,
       });
     }
+    if (error?.code === 'DUPLICATE_LEAD') {
+      const fields = Array.isArray(error.duplicateFields)
+        ? error.duplicateFields.filter((field: unknown) => field === 'phone' || field === 'email')
+        : [];
+      return res.status(409).json({
+        success: false,
+        code: 'DUPLICATE_LEAD',
+        fields,
+        error: duplicateLeadMessage(fields),
+      });
+    }
+    const uniqueFields = uniqueLeadContactFields(error);
+    if (uniqueFields.length) {
+      return res.status(409).json({
+        success: false,
+        code: 'DUPLICATE_LEAD',
+        fields: uniqueFields,
+        error: duplicateLeadMessage(uniqueFields),
+      });
+    }
     if (isPhoneUniqueViolation(error)) {
-      return res.status(409).json({ success: false, action: 'DUPLICATE_CONFLICT', error: PHONE_DUPLICATE_ERROR });
+      return res.status(409).json({
+        success: false,
+        code: 'DUPLICATE_LEAD',
+        fields: ['phone'],
+        error: duplicateLeadMessage(['phone']),
+      });
     }
     if (error?.message === 'INVALID_PROJECT') {
       return res.status(400).json({ success: false, error: 'Invalid project' });
@@ -1112,6 +1168,23 @@ router.put('/:id', authorize('Lead', 'edit'), async (req: AuthRequest, res: Resp
         : undefined;
     delete bodyData.reason;
     const data = leadUpdateSchema.parse(bodyData);
+    const picklistError = validateLeadPicklists(
+      {
+        source: data.source,
+        firstCampaign: data.firstCampaign,
+        lastCampaign: data.lastCampaign,
+        leadInterest: data.leadInterest,
+      },
+      await getLeadPicklistOptions(existingLead.tenantId),
+      { validateRequired: true, partial: true },
+    );
+    if (picklistError) {
+      return res.status(400).json({
+        success: false,
+        error: picklistError.message,
+        fieldErrors: [picklistError],
+      });
+    }
 
     if (data.customFields) {
       const fieldsToValidate = Object.fromEntries(
@@ -1341,8 +1414,22 @@ router.put('/:id', authorize('Lead', 'edit'), async (req: AuthRequest, res: Resp
     if (error?.message === 'COMPLETED_SITE_VISIT_REQUIRED') {
       return res.status(409).json({ success: false, error: 'A completed site visit is required before assigning Sales.' });
     }
+    const uniqueFields = uniqueLeadContactFields(error);
+    if (uniqueFields.length) {
+      return res.status(409).json({
+        success: false,
+        code: 'DUPLICATE_LEAD',
+        fields: uniqueFields,
+        error: duplicateLeadMessage(uniqueFields),
+      });
+    }
     if (isPhoneUniqueViolation(error)) {
-      return res.status(409).json({ success: false, error: PHONE_DUPLICATE_ERROR });
+      return res.status(409).json({
+        success: false,
+        code: 'DUPLICATE_LEAD',
+        fields: ['phone'],
+        error: duplicateLeadMessage(['phone']),
+      });
     }
     if (error?.message === 'NO_ELIGIBLE_USER') {
       return res.status(409).json({

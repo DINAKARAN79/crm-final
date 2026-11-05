@@ -80,12 +80,40 @@ export async function listViewCatalog(actor: Actor, module: ListModule) {
     };
     }),
   ];
+  const fields = publicFields(module);
+  if (module === 'LEAD') {
+    const leadInterest = await prisma.fieldDefinition.findFirst({
+      where: {
+        tenantId: actor.tenantId,
+        name: 'leadInterest',
+        fieldType: 'picklist',
+        isActive: true,
+        object: {
+          is: {
+            tenantId: actor.tenantId,
+            name: { equals: 'Lead', mode: 'insensitive' },
+          },
+        },
+      },
+      select: {
+        picklistValues: {
+          where: { isActive: true },
+          select: { value: true, label: true },
+          orderBy: { displayOrder: 'asc' },
+        },
+      },
+    });
+    const interestField = fields.find((field) => field.key === 'leadInterest');
+    if (interestField) {
+      interestField.options = leadInterest?.picklistValues || [];
+    }
+  }
   const keys = new Set(views.map((item) => item.key));
   const selectedKey = preference && keys.has(preference.viewKey) ? preference.viewKey : defaultViewKey(module);
   return {
     module,
     views,
-    fields: publicFields(module),
+    fields,
     users: users.map((user) => ({ id: user.id, name: `${user.firstName} ${user.lastName}`.trim() })),
     selectedKey,
     pinnedKeys: pins.map((pin) => pin.viewKey).filter((key) => keys.has(key)),

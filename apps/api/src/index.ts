@@ -52,7 +52,7 @@ import companyApiKeyRouter, { setupCompanyApiKeyRouter } from './routes/companyA
 import companyApiCatalogRouter from './routes/companyApiCatalog';
 import companyTelephonyRouter from './routes/companyTelephony';
 import telephonyWebhookRouter from './routes/telephonyWebhook';
-import telephonyClickToCallRouter from './routes/telephonyClickToCall';
+import telephonyDialpadRouter from './routes/telephonyDialpad';
 import setupTelephonyRouter from './routes/setup/telephony';
 import activeUsersRouter, { presenceCountsRouter } from './routes/activeUsers';
 import { sweepIdleSessions } from './services/userPresence';
@@ -77,14 +77,13 @@ import { startSiteVisitMissedScheduler } from './services/siteVisitMissedJob';
 import { assertApiKeyEncryptionConfigured } from './services/apiKeys';
 import superAdminReportingRouter from './routes/superAdminReporting';
 import { warnForMissingRequiredPermissions } from './services/requiredPermissionCatalog';
+import { prisma } from '@dct-crm/db';
 
 export const createApp = () => {
   installImpersonationAuditStamp();
   const app = express();
-  const trustProxy = process.env.TRUST_PROXY?.trim();
-  if (trustProxy) {
-    app.set('trust proxy', trustProxy === '1' || trustProxy === 'true' ? 1 : trustProxy);
-  }
+  const trustProxy = process.env.TRUST_PROXY?.trim() || 'loopback';
+  app.set('trust proxy', trustProxy === '1' || trustProxy === 'true' ? 1 : trustProxy);
 
   app.use(helmet());
   app.use(cors({
@@ -152,7 +151,7 @@ export const createApp = () => {
   app.use('/api/admin', adminRouter);
   app.use('/api/admin', activeUsersRouter);
   app.use('/api/integrations/telephony', telephonyWebhookRouter);
-  app.use('/api/telephony', telephonyClickToCallRouter);
+  app.use('/api/telephony', telephonyDialpadRouter);
   app.use('/api/setup/telephony', setupTelephonyRouter);
   app.use('/api/admin/companies/:tenantId/api-key', companyApiKeyRouter);
   app.use('/api/setup', setupCompanyApiKeyRouter);
@@ -235,10 +234,40 @@ if (require.main === module) {
   sweepPresence();
   const presenceTimer = setInterval(sweepPresence, 30_000);
   presenceTimer.unref();
-  startSiteVisitMissedScheduler();
-  app.listen(PORT, () => {
+  const stopSiteVisitMissedScheduler = startSiteVisitMissedScheduler();
+  const server = app.listen(PORT, () => {
     console.log(`DCT CRM API server running on port ${PORT}`);
   });
+  let shuttingDown = false;
+  const shutdown = (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`Received ${signal}; shutting down API server`);
+    clearInterval(overdueItemsTimer);
+    clearInterval(presenceTimer);
+    stopSiteVisitMissedScheduler();
+    const forceCloseTimer = setTimeout(() => {
+      console.error('API shutdown timed out; closing active connections');
+      server.closeAllConnections();
+    }, 10_000);
+    forceCloseTimer.unref();
+    server.close((error) => {
+      clearTimeout(forceCloseTimer);
+      if (error) {
+        console.error('API server shutdown failed:', error.message);
+        process.exitCode = 1;
+      }
+      void prisma.$disconnect().catch((disconnectError) => {
+        console.error(
+          'Database shutdown failed:',
+          disconnectError instanceof Error ? disconnectError.name : 'unknown error',
+        );
+        process.exitCode = 1;
+      });
+    });
+  };
+  process.once('SIGINT', () => shutdown('SIGINT'));
+  process.once('SIGTERM', () => shutdown('SIGTERM'));
 }
 
 export default app;

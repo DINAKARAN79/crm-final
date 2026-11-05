@@ -3,17 +3,13 @@ import { z } from 'zod';
 import { prisma } from '@dct-crm/db';
 import { auditLog } from '../../middleware/audit';
 import { authenticate, AuthRequest } from '../../middleware/auth';
-import { probeTelephonyConnection } from '../../services/clickToCall';
-import { TelephonyCredentialError } from '../../services/telephonyCredentials';
-import { TelephonyUrlError } from '../../services/telephonyUrl';
-import { getTelephonySettings, listTelephonyRequestLogs, saveTelephonySettings, telephonySettingsSchema } from '../../services/telephonySettings';
+import { getTelephonySettings, listRecentDialpadCalls, saveTelephonySettings, telephonySettingsSchema } from '../../services/telephonySettings';
 import { EffectivePermissionService } from '../../services/effectivePermissions';
-import { decryptTelephonyToken } from '../../services/telephonyCredentials';
-import { assertClickToCallUrl } from '../../services/telephonyUrl';
-import { buildClickToCallPayload } from '../../services/clickToCall';
 import { normalizeLeadPhone } from '../../services/leadDuplicateDetection';
 import { checkDialpadEmbedding } from '../../services/telephonyEmbedding';
 import { getPublicApiBaseUrl } from '../../services/publicApiBaseUrl';
+import { DEFAULT_DIALPAD_URL, TelephonyUrlError, buildDialpadUrl } from '../../services/telephonyUrl';
+import { maskPhone } from '../../services/telephonyNumber';
 
 const router = Router();
 router.use(authenticate);
@@ -85,7 +81,7 @@ router.get('/environment-check', async (req: AuthRequest, res: Response) => {
       settingsTablePresent
         ? prisma.telephonySetting.findUnique({
             where: { tenantId: req.tenantId! },
-            select: { encryptedCredentials: true, dialpadUrl: true },
+          select: { dialpadUrl: true },
           })
         : Promise.resolve(null),
       prisma.profile.findMany({
@@ -113,8 +109,6 @@ router.get('/environment-check', async (req: AuthRequest, res: Response) => {
           name: profile.name,
           granted: profile.profilePermissions.some(({ permission }) => permission.name === 'TELEPHONY_CALL'),
         })),
-        encryptionSecretPresent: Boolean(process.env.API_KEY_ENCRYPTION_SECRET),
-        keySaved: Boolean(settings?.encryptedCredentials),
         apiBaseUrl: base.baseUrl || null,
         apiBaseUrlSource: base.source,
         dialpadUrl: settings?.dialpadUrl || 'https://bizcall.cxteletech.com/embed/dialpad',
@@ -135,17 +129,10 @@ function settingsFailure(error: unknown) {
   if (error instanceof z.ZodError) {
     return { status: 400, code: 'INVALID_SETTINGS', message: error.errors[0]?.message || 'Check the telephony settings.' };
   }
-  if (error instanceof TelephonyCredentialError) {
-    return {
-      status: error.code === 'CREDENTIALS_KEY_MISSING' ? 500 : 400,
-      code: error.code,
-      message: error.message,
-    };
-  }
   if (error instanceof TelephonyUrlError) {
     return { status: 400, code: 'INVALID_SETTINGS', message: error.message };
   }
-  if (error instanceof Error && /auth token|header|click-to-call URL|dialpad URL|Bizcall API key|E\.164|DNC|duplicate|production origin|calls per minute|duplicate click/i.test(error.message)) {
+  if (error instanceof Error && /dialpad URL|E\.164|DNC|production origin/i.test(error.message)) {
     return { status: 400, code: 'INVALID_SETTINGS', message: error.message };
   }
   return null;
@@ -203,39 +190,7 @@ router.post('/check-embedding', async (req: AuthRequest, res: Response) => {
   }
 });
 
-router.post('/test-connection', async (req: AuthRequest, res: Response) => {
-  try {
-    const row = await prisma.telephonySetting.findUnique({ where: { tenantId: req.tenantId! } });
-    if (!row?.clickToCallUrl) {
-      return res.status(409).json({
-        success: false,
-        ok: false,
-        code: 'TELEPHONY_NOT_CONFIGURED',
-        message: 'Telephony is not set up for this company.',
-        step: 'blocked_before_send',
-        error: 'Telephony is not set up for this company.',
-      });
-    }
-    const probe = await probeTelephonyConnection(row);
-    res.json({
-      success: true,
-      ok: probe.reached,
-      code: probe.reached ? 'REACHED' : 'NOT_REACHED',
-      message: probe.reason,
-      step: probe.reached ? 'sent_to_provider' : 'blocked_before_send',
-      data: probe,
-    });
-  } catch (error) {
-    const failure = settingsFailure(error);
-    if (failure) {
-      return res.status(failure.status).json({ success: false, ok: false, code: failure.code, message: failure.message, step: 'blocked_before_send', error: failure.message });
-    }
-    console.error('Telephony test connection error', error instanceof Error ? error.name : 'error');
-    res.status(500).json({ success: false, ok: false, code: 'NOT_REACHED', message: 'The connection test could not run.', step: 'blocked_before_send', error: 'The connection test could not run.' });
-  }
-});
-
-router.post('/test-call', async (req: AuthRequest, res: Response) => {
+router.post('/open-dialpad-with-my-number', async (req: AuthRequest, res: Response) => {
   try {
     const [user, settings] = await Promise.all([
       prisma.user.findFirst({
@@ -246,46 +201,31 @@ router.post('/test-call', async (req: AuthRequest, res: Response) => {
     ]);
     const number = normalizeLeadPhone(user?.phone, null);
     if (!number) {
-      return res.status(409).json({ success: false, ok: false, code: 'ADMIN_PHONE_MISSING', message: 'Add a valid phone number to your user profile before placing a test call.' });
+      return res.status(409).json({ success: false, ok: false, code: 'ADMIN_PHONE_MISSING', message: 'Add a valid phone number to your user profile before opening the dialpad.' });
     }
-    if (!settings?.isActive || !settings.encryptedCredentials) {
-      return res.status(409).json({ success: false, ok: false, code: 'TELEPHONY_NOT_READY', message: 'Telephony must be active with a saved Bizcall key before a test call.' });
+    if (!settings?.isActive) {
+      return res.status(409).json({ success: false, ok: false, code: 'TELEPHONY_INACTIVE', message: 'Turn on telephony before opening the dialpad.' });
     }
-    const apiKey = decryptTelephonyToken(settings.encryptedCredentials);
-    const url = assertClickToCallUrl(settings.clickToCallUrl, { allowTestUrl: settings.allowTestUrl });
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', [settings.authHeaderName || 'X-API-KEY']: apiKey },
-      body: JSON.stringify(buildClickToCallPayload({
-        userId: req.user!.id,
-        customerNumber: number.e164,
-        recordId: 'telephony-admin-test',
-        leadName: [user?.firstName, user?.lastName].filter(Boolean).join(' ') || 'Admin test call',
-        callerId: settings.callerId,
-      })),
-      redirect: 'manual',
-      signal: AbortSignal.timeout(10_000),
+    const dialpadUrl = buildDialpadUrl(settings.dialpadUrl || DEFAULT_DIALPAD_URL, {
+      userId: req.user!.id,
+      number: number.e164,
+      autoDial: settings.autoDialOnClick ?? false,
+      theme: (settings.theme || 'CRM') as 'CRM' | 'LIGHT' | 'DARK',
     });
-    let responseBody: unknown = null;
-    try { responseBody = await response.json(); } catch { responseBody = null; }
-    const success = response.status === 200 && responseBody !== null &&
-      typeof responseBody === 'object' && (responseBody as Record<string, unknown>).success === true;
-    return res.status(success ? 200 : 502).json({
-      success,
-      ok: success,
-      code: success ? 'TEST_CALL_SENT' : 'TEST_CALL_REJECTED',
-      message: success ? 'The test call was sent to Bizcall.' : 'Bizcall did not accept the test call. Check Telephony settings.',
-      step: 'sent_to_provider',
-    });
+    return res.json({ success: true, ok: true, data: { dialpadUrl, maskedNumber: maskPhone(number.e164) } });
   } catch (error) {
-    console.error('Telephony test call error', error instanceof Error ? error.name : 'error');
-    return res.status(502).json({ success: false, ok: false, code: 'TEST_CALL_FAILED', message: 'The test call could not be completed.' });
+    const failure = settingsFailure(error);
+    if (failure) {
+      return res.status(failure.status).json({ success: false, ok: false, code: failure.code, message: failure.message });
+    }
+    console.error('Open dialpad with own number failed', error instanceof Error ? error.name : 'error');
+    return res.status(500).json({ success: false, ok: false, code: 'DIALPAD_OPEN_FAILED', message: 'The dialpad could not be opened.' });
   }
 });
 
 router.get('/logs', async (req: AuthRequest, res: Response) => {
   try {
-    const logs = await listTelephonyRequestLogs(req.tenantId!);
+    const logs = await listRecentDialpadCalls(req.tenantId!);
     const userIds = [...new Set(logs.map((row) => row.userId))];
     const leadIds = [...new Set(logs.map((row) => row.leadId).filter((id): id is string => Boolean(id)))];
     const [users, leads] = await Promise.all([

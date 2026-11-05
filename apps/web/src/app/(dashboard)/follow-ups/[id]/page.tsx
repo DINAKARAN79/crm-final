@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
 import { CalendarClock, CheckCircle2, Clock, History, Pencil, RotateCcw, Save, User, X } from "lucide-react";
 import { followUpApi, impersonationMeta } from "@/lib/api";
-import { clickToCallToast } from "@/lib/click-to-call";
+import { dialpadCallToast } from "@/lib/telephony-call";
 import { requestLeadCall, useTelephonyActive, useTelephonyReasonCode } from "@/lib/telephony-client";
 import { useRecordView } from "@/components/crm/list-view-control";
 import { useAuth } from "@/contexts/auth-context";
@@ -227,7 +227,7 @@ export default function FollowUpDetailPage() {
       leadName: `${lead.firstName || ""} ${lead.lastName || ""}`.trim() || lead.company || lead.leadNumber || "Lead",
       taskId: followUp.id,
     });
-    const notice = clickToCallToast(result, Boolean(isAdmin || isSuperAdmin));
+    const notice = dialpadCallToast(result, Boolean(isAdmin || isSuperAdmin));
     toast({ title: notice.title, description: notice.description, variant: notice.variant });
     setCallingPhoneField(null);
   };

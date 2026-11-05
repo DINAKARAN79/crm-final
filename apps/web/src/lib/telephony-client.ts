@@ -1,15 +1,15 @@
 import { useSyncExternalStore } from "react";
-import type { ClickToCallField, ClickToCallOutcome } from "@/lib/click-to-call";
+import type { DialpadCallField, DialpadCallOutcome } from "@/lib/telephony-call";
 import type { DialerCommand } from "@/lib/bizcall-dialpad";
 
 type DialRequest = {
   leadId: string;
-  phoneField: ClickToCallField;
+  phoneField: DialpadCallField;
   leadName: string;
   taskId?: string;
 };
 
-type DialHandler = (request: DialRequest) => Promise<ClickToCallOutcome>;
+type DialHandler = (request: DialRequest) => Promise<DialpadCallOutcome>;
 type DialerCommandHandler = (command: DialerCommand) => { ok: boolean; reason?: string };
 
 let dialHandler: DialHandler | null = null;
@@ -38,17 +38,14 @@ export function requestDialerCommand(command: DialerCommand) {
   return dialerCommandHandler(command);
 }
 
-export function requestLeadCall(request: DialRequest): Promise<ClickToCallOutcome> {
+export function requestLeadCall(request: DialRequest): Promise<DialpadCallOutcome> {
   if (!dialHandler) {
     return Promise.resolve({
       ok: false,
       code: "TELEPHONY_NOT_READY",
       step: "blocked_before_send",
       message: "Telephony is not ready. Refresh the CRM and try again.",
-      ignored: false,
       callDetailId: null,
-      leadStatus: null,
-      statusChanged: false,
       leadName: null,
     });
   }

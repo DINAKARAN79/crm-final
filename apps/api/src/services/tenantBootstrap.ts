@@ -332,6 +332,31 @@ export async function bootstrapTenant(
       skipDuplicates: true,
     });
   }
+  const leadObject = definitions.find(({ name }) => name === 'Lead');
+  if (leadObject) {
+    const leadInterestField = await tx.fieldDefinition.findFirst({
+      where: { tenantId, objectId: leadObject.id, name: 'leadInterest' },
+      select: { id: true },
+    });
+    if (leadInterestField) {
+      await tx.picklistValue.createMany({
+        data: [
+          { label: 'Prospect', value: 'PROSPECT', isDefault: true },
+          { label: 'Hot', value: 'HOT', isDefault: false },
+          { label: 'Warm', value: 'WARM', isDefault: false },
+          { label: 'Unable to Connect', value: 'UNABLE_TO_CONNECT', isDefault: false },
+          { label: 'Dropped', value: 'DROPPED', isDefault: false },
+          { label: 'Cold', value: 'COLD', isDefault: false },
+        ].map((option, displayOrder) => ({
+          tenantId,
+          fieldId: leadInterestField.id,
+          ...option,
+          displayOrder,
+        })),
+        skipDuplicates: true,
+      });
+    }
+  }
 
   const existingLayouts = await tx.pageLayout.findMany({
     where: { objectId: { in: objectIds }, isDefault: true },

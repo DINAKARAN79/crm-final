@@ -1,31 +1,24 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { authenticate, AuthRequest } from '../middleware/auth';
-import { maskPhone, placeClickToCall, type ClickToCallPhoneField } from '../services/clickToCall';
+import { maskPhone } from '../services/telephonyNumber';
 import { EffectivePermissionService } from '../services/effectivePermissions';
 import { prisma, type Prisma } from '@dct-crm/db';
 import { DEFAULT_DIALPAD_URL } from '../services/telephonyUrl';
 import { canAccessLead } from '../services/recordAccess';
 import { normalizeLeadPhone } from '../services/leadDuplicateDetection';
 import { applyCallLogStatusRule } from '../services/callLogStatus';
-import { decryptTelephonyToken, TelephonyCredentialError } from '../services/telephonyCredentials';
 import { appendLeadProcessNote } from '../services/leadNotes';
+import { buildDialpadUrl } from '../services/telephonyUrl';
 
 const router = Router();
 router.use(authenticate);
 
-const requestSchema = z.object({
-  leadId: z.string().trim().min(1),
-  phoneField: z.enum(['phone', 'mobile', 'secondaryPhone']).optional(),
-});
 const dialpadCallSchema = z.object({
   leadId: z.string().trim().min(1),
   phoneField: z.enum(['phone', 'mobile', 'secondaryPhone']).default('phone'),
   taskId: z.string().trim().min(1).max(255).optional(),
 });
-const manualDialpadCallSchema = z.object({
-  number: z.string().trim().regex(/^\+[1-9]\d{1,14}$/),
-}).strict();
 const dialpadEventSchema = z.object({
   event: z.enum([
     'BIZCALL_AGENT_REGISTERED',
@@ -141,26 +134,10 @@ router.get('/client-config', async (req: AuthRequest, res: Response) => {
     if (!settings.isActive) {
       return res.json({ success: true, ok: false, data: { active: false, permissionGranted: true, reasonCode: 'DISABLED' } });
     }
-    if (!settings.encryptedCredentials) {
-      return res.json({ success: true, ok: false, data: { active: false, permissionGranted: true, reasonCode: 'KEY_MISSING' } });
-    }
-    try {
-      decryptTelephonyToken(settings.encryptedCredentials);
-    } catch (error) {
-      if (error instanceof TelephonyCredentialError) {
-        return res.json({
-          success: true,
-          ok: false,
-          data: {
-            active: false,
-            permissionGranted: true,
-            reasonCode: 'KEY_UNREADABLE',
-          },
-        });
-      }
-      throw error;
-    }
-    const dialpadUrl = settings?.dialpadUrl || DEFAULT_DIALPAD_URL;
+    const dialpadUrl = buildDialpadUrl(settings.dialpadUrl || DEFAULT_DIALPAD_URL, {
+      userId: req.user!.id,
+      theme: (settings.theme || 'CRM') as 'CRM' | 'LIGHT' | 'DARK',
+    });
     return res.json({
       success: true,
       ok: true,
@@ -170,13 +147,12 @@ router.get('/client-config', async (req: AuthRequest, res: Response) => {
         reasonCode: 'ACTIVE',
         dialpadUrl,
         dialpadOrigin: new URL(dialpadUrl).origin,
-        dialpadMode: settings?.dialpadMode || 'DOCKED',
-        callMethod: settings?.callMethod || 'SERVER_API',
-        theme: settings?.theme || 'CRM',
+        dialpadMode: settings.dialpadMode || 'DOCKED',
+        theme: settings.theme || 'CRM',
         defaultDockState: settings?.defaultDockState || 'COLLAPSED',
         maskNumbers: Boolean(settings?.maskNumbers),
         sendTenantIdInDial: settings?.sendTenantIdInDial ?? true,
-        autoDialOnClick: settings?.autoDialOnClick ?? true,
+        autoDialOnClick: settings?.autoDialOnClick ?? false,
       },
     });
   } catch (error) {
@@ -196,44 +172,7 @@ router.post('/dialpad-call-started', async (req: AuthRequest, res: Response) => 
   }
   const parsed = dialpadCallSchema.safeParse(req.body);
   if (!parsed.success) {
-    const manual = manualDialpadCallSchema.safeParse(req.body);
-    if (!manual.success) {
-      return res.status(400).json({ success: false, ok: false, code: 'INVALID_REQUEST', message: 'A valid lead or E.164 number is required.' });
-    }
-    if (!(await EffectivePermissionService.hasPermission(req.user!.id, 'TELEPHONY_CALL'))) {
-      return res.status(403).json({ success: false, ok: false, code: 'NO_PERMISSION', message: 'Telephony permission is required.' });
-    }
-    try {
-      const settings = await prisma.telephonySetting.findUnique({ where: { tenantId: req.tenantId! } });
-      if (!settings?.isActive || !settings.encryptedCredentials) {
-        return res.status(409).json({ success: false, ok: false, code: 'TELEPHONY_KEY_MISSING', message: 'Telephony is not active for this company.' });
-      }
-      const now = new Date();
-      const call = await prisma.callDetail.create({
-        data: {
-          tenantId: req.tenantId!,
-          leadId: null,
-          name: `Dialpad manual call ${now.getTime()}`.slice(0, 255),
-          callType: 'OUTBOUND',
-          callTo: manual.data.number,
-          status: 'Initiated',
-          startAt: now,
-          endAt: now,
-          duration: 0,
-          createdById: req.user!.id,
-          ownerId: req.user!.id,
-          source: 'dialpad',
-        },
-        select: { id: true },
-      });
-      await auditDialpadEvent(req.tenantId!, req.user!.id, 'DIALPAD_CALL_STARTED', call.id, null, {
-        number: maskPhone(manual.data.number),
-      });
-      return res.status(201).json({ success: true, ok: true, data: { callDetailId: call.id } });
-    } catch (error) {
-      console.error('Manual dialpad call could not be recorded', error instanceof Error ? error.name : 'error');
-      return res.status(500).json({ success: false, ok: false, code: 'CALL_START_FAILED', message: 'The call could not be recorded.' });
-    }
+    return res.status(400).json({ success: false, ok: false, code: 'INVALID_REQUEST', message: 'A valid lead is required.' });
   }
   if (!(await EffectivePermissionService.hasPermission(req.user!.id, 'TELEPHONY_CALL'))) {
     return res.status(403).json({ success: false, ok: false, code: 'NO_PERMISSION', message: 'Telephony permission is required.' });
@@ -250,11 +189,8 @@ router.post('/dialpad-call-started', async (req: AuthRequest, res: Response) => 
         },
       }),
     ]);
-    if (!settings?.isActive || !settings.encryptedCredentials) {
-      return res.status(409).json({ success: false, ok: false, code: 'TELEPHONY_KEY_MISSING', message: 'Telephony key is missing. Ask an admin to add it in Setup > Integrations > Telephony.' });
-    }
-    if (settings.callMethod !== 'DIALPAD_MESSAGE') {
-      return res.status(409).json({ success: false, ok: false, code: 'WRONG_CALL_METHOD', message: 'Dialpad messaging is not the active call method.' });
+    if (!settings?.isActive) {
+      return res.status(409).json({ success: false, ok: false, code: 'TELEPHONY_INACTIVE', message: 'Telephony is switched off for this company.' });
     }
     if (!lead || !(await canAccessLead(req.user!, lead))) {
       return res.status(404).json({ success: false, ok: false, code: 'LEAD_NOT_FOUND', message: 'Lead not found.' });
@@ -278,6 +214,18 @@ router.post('/dialpad-call-started', async (req: AuthRequest, res: Response) => 
     if (settings.blockDnc && settings.dncNumbers.split(/[\s,;]+/).includes(normalized.e164)) {
       return res.status(409).json({ success: false, ok: false, code: 'DO_NOT_CALL', message: 'This number is on the Do-Not-Call list.' });
     }
+    const displayName = [lead.firstName, lead.lastName].filter(Boolean).join(' ').trim() || lead.company || 'Unknown';
+    let dialpadUrl: string;
+    try {
+      dialpadUrl = buildDialpadUrl(settings.dialpadUrl || DEFAULT_DIALPAD_URL, {
+        userId: req.user!.id,
+        number: normalized.e164,
+        autoDial: settings.autoDialOnClick ?? false,
+        theme: (settings.theme || 'CRM') as 'CRM' | 'LIGHT' | 'DARK',
+      });
+    } catch {
+      return res.status(503).json({ success: false, ok: false, code: 'INVALID_DIALPAD_URL', message: 'The configured Bizcall dialpad URL is invalid or is not HTTPS.' });
+    }
     const guard = reserveDialpadCall(req.user!.id, lead.id, Date.now(), settings.duplicateGuardSeconds, settings.callsPerMinute);
     if (guard === 'duplicate') return res.status(409).json({ success: false, ok: false, code: 'DUPLICATE_CLICK', message: 'A call to this lead was just started.' });
     if (guard === 'rate') return res.status(429).json({ success: false, ok: false, code: 'RATE_LIMITED', message: 'Too many calls. Wait a minute and try again.' });
@@ -287,7 +235,6 @@ router.post('/dialpad-call-started', async (req: AuthRequest, res: Response) => 
       select: { id: true },
     });
     if (duplicate) return res.status(409).json({ success: false, ok: false, code: 'DUPLICATE_CLICK', message: 'A call to this lead was just started.', data: { callDetailId: duplicate.id } });
-    const displayName = [lead.firstName, lead.lastName].filter(Boolean).join(' ').trim() || lead.company || 'Unknown';
     const now = new Date();
     const call = await prisma.$transaction(async (tx) => {
       const created = await tx.callDetail.create({
@@ -318,6 +265,11 @@ router.post('/dialpad-call-started', async (req: AuthRequest, res: Response) => 
           newValues: { number: maskPhone(normalized.e164) },
         },
       });
+      await applyCallLogStatusRule(lead.id, tx, {
+        tenantId: req.tenantId!,
+        userId: req.user!.id,
+        callLogId: created.id,
+      });
       return created;
     });
     return res.status(201).json({
@@ -325,12 +277,11 @@ router.post('/dialpad-call-started', async (req: AuthRequest, res: Response) => 
       ok: true,
       data: {
         callDetailId: call.id,
-        normalizedNumber: normalized.e164,
+        number: normalized.e164,
         leadName: displayName,
         recordId: lead.id,
-        ...(parsed.data.taskId ? { taskId: parsed.data.taskId } : {}),
         tenantId: req.tenantId!,
-        allowed: true,
+        dialpadUrl,
       },
     });
   } catch (error) {
@@ -513,54 +464,6 @@ router.post('/dialpad-event', async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error('Dialpad event error', error instanceof Error ? error.name : 'error');
     return res.status(500).json({ success: false, ok: false, code: 'DIALPAD_EVENT_FAILED', message: 'The call event could not be recorded.' });
-  }
-});
-
-export function readClickToCallRequest(body: unknown): { leadId: string; phoneField: ClickToCallPhoneField } {
-  const parsed = requestSchema.parse(body ?? {});
-  return { leadId: parsed.leadId, phoneField: parsed.phoneField ?? 'phone' };
-}
-
-router.post('/click-to-call', async (req: AuthRequest, res: Response) => {
-  if (req.impersonation) {
-    return res.status(403).json({
-      success: false,
-      ok: false,
-      code: 'IMPERSONATION_DISABLED',
-      message: 'Calls are disabled while viewing as another user.',
-    });
-  }
-  try {
-    const request = readClickToCallRequest(req.body);
-    const result = await placeClickToCall({
-      user: req.user!,
-      tenantId: req.tenantId!,
-      leadId: request.leadId,
-      phoneField: request.phoneField,
-    });
-    return res.status(result.httpStatus).json({
-      success: result.ok,
-      ok: result.ok,
-      code: result.code,
-      message: result.message,
-      step: result.step,
-      ...(result.ok ? {} : { error: result.message }),
-      data: {
-        ignored: Boolean(result.ignored),
-        callDetailId: result.callDetailId || null,
-        leadStatus: result.leadStatus || null,
-        statusChanged: Boolean(result.statusChanged),
-        leadName: result.leadName || null,
-        providerStatus: result.providerStatus ?? null,
-      },
-    });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      const message = error.errors[0]?.message || 'A lead is required.';
-      return res.status(400).json({ success: false, ok: false, code: 'INVALID_REQUEST', message, step: 'blocked_before_send', error: message });
-    }
-    console.error('Click-to-call error', error instanceof Error ? error.name : 'error');
-    return res.status(500).json({ success: false, ok: false, code: 'CALL_FAILED', message: 'The call could not be started.', step: 'blocked_before_send', error: 'The call could not be started.' });
   }
 });
 

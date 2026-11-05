@@ -51,7 +51,7 @@ describe('effective field permissions', () => {
       label: 'Click to call',
       module: 'TELEPHONY',
       action: 'CALL',
-      description: 'Place an outbound click-to-call from a lead',
+      description: 'Place an outbound call from a lead through the Bizcall dialpad',
       isActive: true,
       createdAt: new Date(),
       updatedAt: new Date(),

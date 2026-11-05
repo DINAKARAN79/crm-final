@@ -17,6 +17,7 @@ const database = vi.hoisted(() => ({
   fieldDefinitionCreate: vi.fn(),
   picklistValueFindMany: vi.fn(),
   picklistValueCreateMany: vi.fn(),
+  leadStatusSettingFindUnique: vi.fn(),
   pageLayoutFindFirst: vi.fn(),
   pageLayoutCreate: vi.fn(),
   pageLayoutUpdate: vi.fn(),
@@ -53,6 +54,7 @@ vi.mock('@dct-crm/db', () => ({
       findMany: database.picklistValueFindMany,
       createMany: database.picklistValueCreateMany,
     },
+    leadStatusSetting: { findUnique: database.leadStatusSettingFindUnique },
     pageLayout: {
       findFirst: database.pageLayoutFindFirst,
       create: database.pageLayoutCreate,
@@ -78,6 +80,13 @@ vi.mock('../middleware/auth', () => ({
 
 vi.mock('../middleware/authorization', () => ({
   authorize: () => (_req: any, _res: any, next: any) => next(),
+}));
+
+vi.mock('../services/leadPicklists', () => ({
+  getLeadPicklistOptions: vi.fn().mockResolvedValue(new Map([
+    ['source', new Set(['WEBSITE'])],
+  ])),
+  validateLeadPicklists: vi.fn().mockReturnValue(null),
 }));
 
 vi.mock('../services/workflow', () => ({
@@ -180,6 +189,7 @@ beforeEach(() => {
   }));
   database.picklistValueFindMany.mockResolvedValue([]);
   database.picklistValueCreateMany.mockResolvedValue({ count: 1 });
+  database.leadStatusSettingFindUnique.mockResolvedValue(null);
   database.pageLayoutFindFirst.mockResolvedValue(null);
   database.pageLayoutCreate.mockResolvedValue({ id: 'lead-layout-a' });
   database.pageLayoutUpdate.mockResolvedValue({});

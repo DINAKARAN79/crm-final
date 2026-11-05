@@ -191,6 +191,7 @@ export const REPORT_OBJECTS: Record<string, ReportObject> = {
       phone: { label: 'Phone', path: 'phone', type: 'string' },
       status: { label: 'Status', path: 'status', type: 'enum' },
       source: { label: 'Lead Source', path: 'source', type: 'enum' },
+      leadInterest: { label: 'Lead Interest', path: 'leadInterest', type: 'enum' },
       score: { label: 'Score', path: 'score', type: 'number' },
       budget: { label: 'Budget', path: 'budget', type: 'number' },
       requirements: { label: 'Requirements', path: 'requirements', type: 'string' },

@@ -43,32 +43,47 @@ export const authenticate = async (
   res: Response,
   next: NextFunction
 ) => {
+  if (req.apiKey && req.user && req.tenantId) return next();
+
+  const authorizationHeader = req.headers.authorization;
+  const browserSessionRequired = req.headers['x-session-auth'] === 'required';
+  const token = authorizationHeader?.startsWith('Bearer ')
+    ? authorizationHeader.slice('Bearer '.length)
+    : browserSessionRequired
+      ? undefined
+      : req.cookies?.token;
+
+  if (!token) {
+    return res.status(401).json({ success: false, error: 'Authentication required' });
+  }
+  if (!process.env.JWT_SECRET) {
+    return res.status(503).json({ success: false, error: 'Authentication service is not configured' });
+  }
+
+  let decoded: {
+    id: string;
+    email: string;
+    tenantId: string;
+    isSuperAdmin: boolean;
+    impersonatedBy?: string;
+    loginAt?: number;
+    sid?: string;
+    isImpersonation?: boolean;
+    impersonationId?: string;
+    exp?: number;
+  };
   try {
-    if (req.apiKey && req.user && req.tenantId) return next();
-    const authorizationHeader = req.headers.authorization;
-    const browserSessionRequired = req.headers['x-session-auth'] === 'required';
-    const token = authorizationHeader?.startsWith('Bearer ')
-      ? authorizationHeader.slice('Bearer '.length)
-      : browserSessionRequired
-        ? undefined
-        : req.cookies?.token;
+    decoded = jwt.verify(token, process.env.JWT_SECRET) as typeof decoded;
+  } catch (error) {
+    const expired = error instanceof jwt.TokenExpiredError;
+    return res.status(401).json({
+      success: false,
+      error: expired ? 'Access token expired' : 'Invalid token',
+      code: expired ? 'ACCESS_TOKEN_EXPIRED' : 'INVALID_TOKEN',
+    });
+  }
 
-    if (!token) {
-      return res.status(401).json({ success: false, error: 'Authentication required' });
-    }
-
-    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as {
-      id: string;
-      email: string;
-      tenantId: string;
-      isSuperAdmin: boolean;
-      impersonatedBy?: string;
-      loginAt?: number;
-      sid?: string;
-      isImpersonation?: boolean;
-      impersonationId?: string;
-      exp?: number;
-    };
+  try {
     req.sessionLoginAt = typeof decoded.loginAt === 'number' ? decoded.loginAt : undefined;
     req.sessionSecret = typeof decoded.sid === 'string' ? decoded.sid : undefined;
     req.tokenExpiresAt = typeof decoded.exp === 'number' ? decoded.exp : undefined;
@@ -162,7 +177,8 @@ export const authenticate = async (
     if (error instanceof ImpersonationError) {
       return res.status(error.status).json({ success: false, error: error.message, code: error.code });
     }
-    return res.status(401).json({ success: false, error: 'Invalid token' });
+    console.error('Authentication dependency failed:', error instanceof Error ? error.name : 'unknown error');
+    return res.status(503).json({ success: false, error: 'Authentication service temporarily unavailable' });
   }
 };
 

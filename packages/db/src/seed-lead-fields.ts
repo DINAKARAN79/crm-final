@@ -175,9 +175,32 @@ const STANDARD_LEAD_FIELDS: FieldSeed[] = [
     ],
   },
   {
+    name: 'firstCampaign', label: 'First Campaign', fieldType: 'picklist',
+    isStandardField: true, isCustomField: false,
+    displayOrder: 31, searchable: true, sortable: true, filterable: true,
+  },
+  {
+    name: 'lastCampaign', label: 'Last Campaign', fieldType: 'picklist',
+    isStandardField: true, isCustomField: false,
+    displayOrder: 32, searchable: true, sortable: true, filterable: true,
+  },
+  {
+    name: 'leadInterest', label: 'Lead Interest', fieldType: 'picklist',
+    isStandardField: true, isCustomField: false,
+    displayOrder: 33, searchable: true, sortable: true, filterable: true,
+    picklistValues: [
+      { label: 'Prospect', value: 'PROSPECT', isDefault: true, displayOrder: 0 },
+      { label: 'Hot', value: 'HOT', displayOrder: 1 },
+      { label: 'Warm', value: 'WARM', displayOrder: 2 },
+      { label: 'Unable to Connect', value: 'UNABLE_TO_CONNECT', displayOrder: 3 },
+      { label: 'Dropped', value: 'DROPPED', displayOrder: 4 },
+      { label: 'Cold', value: 'COLD', displayOrder: 5 },
+    ],
+  },
+  {
     name: 'status', label: 'Lead Status', fieldType: 'picklist',
     isStandardField: false, isCustomField: true,
-    displayOrder: 31, searchable: true, sortable: true, filterable: true,
+    displayOrder: 34, searchable: true, sortable: true, filterable: true,
     picklistValues: [
       { label: 'New', value: 'NEW', isDefault: true, displayOrder: 0 },
       { label: 'Incoming', value: 'INCOMING', displayOrder: 1 },
@@ -190,7 +213,7 @@ const STANDARD_LEAD_FIELDS: FieldSeed[] = [
   {
     name: 'rating', label: 'Rating', fieldType: 'picklist',
     isStandardField: false, isCustomField: true,
-    displayOrder: 32, searchable: true, sortable: true, filterable: true,
+    displayOrder: 35, searchable: true, sortable: true, filterable: true,
     picklistValues: [
       { label: 'Hot', value: 'HOT', displayOrder: 0 },
       { label: 'Warm', value: 'WARM', displayOrder: 1 },
@@ -200,12 +223,12 @@ const STANDARD_LEAD_FIELDS: FieldSeed[] = [
   {
     name: 'description', label: 'Description', fieldType: 'longText',
     isStandardField: false, isCustomField: true,
-    displayOrder: 33, maxLength: 5000,
+    displayOrder: 36, maxLength: 5000,
   },
   {
     name: 'score', label: 'Score', fieldType: 'number',
     isSystemField: false, isCustomField: true, isStandardField: false,
-    displayOrder: 34, sortable: true, filterable: true, editable: false, minValue: 0, maxValue: 100, visible: false,
+    displayOrder: 37, sortable: true, filterable: true, editable: false, minValue: 0, maxValue: 100, visible: false,
   },
 
   // Address
@@ -237,7 +260,10 @@ const STANDARD_LEAD_FIELDS: FieldSeed[] = [
 ];
 
 async function seedLeadFieldsForTenant(tenantId: string, createdBy: string) {
-  const operationalCustomFieldNames = new Set(['source', 'status', 'rating', 'description', 'score']);
+  const operationalCustomFieldNames = new Set([
+    'source', 'firstCampaign', 'lastCampaign', 'leadInterest', 'status', 'rating', 'description', 'score',
+  ]);
+  const configuredPicklistFieldNames = new Set(['source', 'firstCampaign', 'lastCampaign', 'leadInterest']);
   // Find or create Lead ObjectDefinition
   let leadObject = await prisma.objectDefinition.findFirst({
     where: { tenantId, name: { equals: 'Lead', mode: 'insensitive' } },
@@ -278,6 +304,15 @@ async function seedLeadFieldsForTenant(tenantId: string, createdBy: string) {
 
     if (existing) {
       if (
+        configuredPicklistFieldNames.has(fieldSeed.name) &&
+        existing.fieldType !== fieldSeed.fieldType
+      ) {
+        await prisma.fieldDefinition.update({
+          where: { id: existing.id },
+          data: { fieldType: fieldSeed.fieldType },
+        });
+      }
+      if (
         operationalCustomFieldNames.has(fieldSeed.name) &&
         (
           existing.isSystemField !== (fieldSeed.isSystemField ?? false) ||
@@ -304,6 +339,12 @@ async function seedLeadFieldsForTenant(tenantId: string, createdBy: string) {
         await prisma.fieldDefinition.update({
           where: { id: existing.id },
           data: { visible: fieldSeed.visible },
+        });
+      }
+      if (configuredPicklistFieldNames.has(fieldSeed.name) && !existing.isActive) {
+        await prisma.fieldDefinition.update({
+          where: { id: existing.id },
+          data: { isActive: true },
         });
       }
       if (fieldSeed.picklistValues?.length) {
@@ -385,7 +426,7 @@ async function seedLeadFieldsForTenant(tenantId: string, createdBy: string) {
           },
           {
             name: 'Lead Details',
-            fields: ['source', 'status', 'rating', 'description'],
+            fields: ['source', 'firstCampaign', 'lastCampaign', 'leadInterest', 'status', 'rating', 'description'],
           },
           {
             name: 'Address',

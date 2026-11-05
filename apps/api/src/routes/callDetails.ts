@@ -9,7 +9,7 @@ import { applyCallLogStatusRule } from '../services/callLogStatus';
 import { followUpAccessWhere } from '../services/followUpAccess';
 import { tagLeadFollowUpEvents } from '../services/leadEventTagging';
 import { appendLeadProcessNote } from '../services/leadNotes';
-import { maskPhone } from '../services/clickToCall';
+import { maskPhone } from '../services/telephonyNumber';
 
 const router = Router();
 router.use(authenticate);

@@ -34,7 +34,11 @@ describe('bootstrapTenant', () => {
       updateMany: vi.fn().mockResolvedValue({ count: 0 }),
       deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
       findFirst: vi.fn(async ({ where }: { where?: { name?: string } }) => (
-        where?.name === 'bookingStage' ? { id: 'stage-field', required: true } : null
+        where?.name === 'bookingStage'
+          ? { id: 'stage-field', required: true }
+          : where?.name === 'leadInterest'
+            ? { id: 'lead-interest-field' }
+            : null
       )),
     },
     auditLog: { create: vi.fn().mockResolvedValue({ id: 'audit' }) },
@@ -185,6 +189,18 @@ describe('bootstrapTenant', () => {
       },
       create: expect.objectContaining({ tenantId: 'new-tenant', name: 'New Tenant' }),
     }));
+    const interestOptions = vi.mocked(tx.picklistValue.createMany).mock.calls.flatMap((call) => {
+      const data = call[0]?.data ?? [];
+      return (Array.isArray(data) ? data : [data]).filter((option) => option.fieldId === 'lead-interest-field');
+    });
+    expect(interestOptions.map(({ value, isDefault }) => ({ value, isDefault }))).toEqual([
+      { value: 'PROSPECT', isDefault: true },
+      { value: 'HOT', isDefault: false },
+      { value: 'WARM', isDefault: false },
+      { value: 'UNABLE_TO_CONNECT', isDefault: false },
+      { value: 'DROPPED', isDefault: false },
+      { value: 'COLD', isDefault: false },
+    ]);
     expect(tx.customRecord.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         tenantId: 'new-tenant',

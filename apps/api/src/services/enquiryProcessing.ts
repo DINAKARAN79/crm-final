@@ -5,6 +5,7 @@ import { getNextSiteVisitNumber } from './leadWorkflowExtras';
 import { createOwnerHistory } from './ownerHistory';
 import {
   acquireLeadDuplicateLocks,
+  duplicateLeadFields,
   findLeadDuplicatesBatch,
   findLeadDuplicates,
   type LeadDuplicateInput,
@@ -161,12 +162,7 @@ async function getNextLeadNumber(tx: Prisma.TransactionClient, tenantId: string)
 }
 
 export function sourceEnumValue(source: string): LeadCreateData['source'] {
-  const normalized = canonicalizeLeadSource(source).toUpperCase().replace(/[\s-]+/g, '_');
-  const allowed = new Set([
-    'WEBSITE', 'FACEBOOK', 'REFERRAL', 'COLD_CALL', 'ADVERTISEMENT', 'WALK_IN', 'PORTAL',
-    'INSTAGRAM', 'TWITTER', 'WHATSAPP', 'YOUTUBE', 'OTHER',
-  ]);
-  return (allowed.has(normalized) ? normalized : 'OTHER') as LeadCreateData['source'];
+  return source.trim() || 'OTHER';
 }
 
 export function canonicalizeLeadSource(source: string): string {
@@ -188,6 +184,7 @@ export async function processLeadEnquiry(
     transaction?: Prisma.TransactionClient;
     duplicateMatches?: LeadDuplicateMatch[];
     duplicateLocksAcquired?: boolean;
+    rejectDuplicates?: boolean;
   } = {},
 ) {
   const validationErrors = validateLeadContactInput({
@@ -346,6 +343,13 @@ export async function processLeadEnquiry(
         })
       : [];
 
+    if (options.rejectDuplicates && !input.expectedLeadId && duplicateMatches.length) {
+      throw Object.assign(new Error('DUPLICATE_LEAD'), {
+        code: 'DUPLICATE_LEAD',
+        duplicateFields: duplicateLeadFields(duplicateMatches),
+      });
+    }
+
     if (existingLeads.length > 1 || duplicateMatches.some((match) => match.ambiguous)) {
       await tx.auditLog.create({
         data: {
@@ -394,7 +398,7 @@ export async function processLeadEnquiry(
       return { action: 'LEAD_MISMATCH' as const, leadIds: existingLeads.map((lead) => lead.id) };
     }
 
-    const source = sourceEnumValue(metadata.source);
+    const source = sourceEnumValue(input.lead.source || metadata.source);
     const now = new Date();
     if (existingLeads.length === 1) {
       const existing = existingLeads[0];
@@ -744,13 +748,13 @@ export async function processLeadEnquiry(
         numberOfEmployees: input.lead.numberOfEmployees || undefined,
         source,
         lastSource: metadata.source,
-        firstCampaign: metadata.campaign,
+        firstCampaign: input.lead.firstCampaign || metadata.campaign,
         lastEnquiryAt: now,
         enquiryCount: 1,
         leadType: 'ORIGINAL',
         firstSubSource: metadata.subSource,
         lastSubSource: metadata.subSource,
-        lastCampaign: metadata.campaign,
+        lastCampaign: input.lead.lastCampaign || metadata.subCampaign || metadata.campaign,
         status: 'NEW',
         rating: input.lead.rating || undefined,
         leadInterest: input.lead.leadInterest || undefined,
@@ -904,7 +908,10 @@ export async function processLeadEnquiry(
     : prisma.$transaction(processInTransaction);
 }
 
-export async function processLeadEnquiryBatch(inputs: LeadEnquiryInput[]) {
+export async function processLeadEnquiryBatch(
+  inputs: LeadEnquiryInput[],
+  options: { rejectDuplicates?: boolean } = {},
+) {
   if (!inputs.length) return [];
   const tenantIds = new Set(inputs.map((input) => input.tenantId));
   if (tenantIds.size !== 1) throw new Error('LEAD_IMPORT_TENANT_MISMATCH');
@@ -949,6 +956,7 @@ export async function processLeadEnquiryBatch(inputs: LeadEnquiryInput[]) {
           transaction: tx,
           duplicateMatches,
           duplicateLocksAcquired: true,
+          rejectDuplicates: options.rejectDuplicates,
         });
         if (result.action === 'DUPLICATE_CONFLICT' || result.action === 'LEAD_MISMATCH') {
           auditState.duplicateConflictAudit = {

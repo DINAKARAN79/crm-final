@@ -113,6 +113,10 @@ describe("SetupPage", () => {
       "href",
       "/setup/data/import?tenantId=tenant-1",
     );
+    expect(screen.getByRole("link", { name: /Data Update/i })).toHaveAttribute(
+      "href",
+      "/setup/data/update?tenantId=tenant-1",
+    );
     expect(screen.getByRole("link", { name: /CP Portal$/i })).toHaveAttribute(
       "href",
       "http://localhost:3002/login",

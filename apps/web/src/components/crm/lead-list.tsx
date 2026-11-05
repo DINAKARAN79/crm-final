@@ -38,6 +38,7 @@ export interface Lead {
   countryCode?: string | null;
   phoneIsValid?: boolean;
   source: string;
+  leadInterest?: string | null;
   status: string;
   statusLabel?: string;
   rating?: string;
@@ -173,6 +174,11 @@ export function getLeadColumns({
       cell: ({ row }) => (
         <Badge variant="outline">{row.getValue("source")}</Badge>
       ),
+    },
+    {
+      accessorKey: "leadInterest",
+      header: "Lead Interest",
+      cell: ({ row }) => row.original.leadInterest || "—",
     },
     {
       accessorKey: "status",

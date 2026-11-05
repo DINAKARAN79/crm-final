@@ -1,10 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import { parseFilterLogic } from '@dct-crm/shared';
-import { compileListFilters, systemViewsFor, validateFilterSet } from './listViewCatalog';
+import { compileListFilters, publicFields, systemViewsFor, validateFilterSet } from './listViewCatalog';
 
 const noon = new Date('2026-10-28T06:30:00.000Z');
 
 describe('list view catalog', () => {
+  it('exposes Lead Interest as a configurable picklist filter', () => {
+    const field = publicFields('LEAD').find((item) => item.key === 'leadInterest');
+    expect(field).toMatchObject({
+      label: 'Lead Interest',
+      kind: 'string',
+      operators: expect.arrayContaining(['equals']),
+    });
+  });
+
   it('keeps each module’s views separate', () => {
     const leads = systemViewsFor('LEAD').map((view) => view.name);
     const followUps = systemViewsFor('FOLLOW_UP').map((view) => view.name);

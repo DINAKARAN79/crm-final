@@ -70,6 +70,7 @@ const groups = [
     description: "Prepare the system for data operations.",
     items: [
       { label: "Data Import", href: "/setup/data/import", icon: ClipboardList },
+      { label: "Data Update", href: "/setup/data/update", icon: ArrowRight },
     ],
   },
 ];

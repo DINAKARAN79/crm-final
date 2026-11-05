@@ -3,10 +3,9 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const testState = vi.hoisted(() => ({
-  checkDuplicates: vi.fn(),
   createLead: vi.fn(),
+  listFields: vi.fn(),
   listProjects: vi.fn(),
-  listUsers: vi.fn(),
   push: vi.fn(),
   toast: vi.fn(),
 }));
@@ -21,11 +20,10 @@ vi.mock("@/hooks/use-toast", () => ({
 
 vi.mock("@/lib/api", () => ({
   leadApi: {
-    checkDuplicates: testState.checkDuplicates,
     create: testState.createLead,
   },
   projectApi: { listAll: testState.listProjects },
-  userApi: { list: testState.listUsers },
+  objectDefinitionApi: { fields: testState.listFields },
 }));
 
 import NewLeadPage from "../app/(dashboard)/leads/new/page";
@@ -33,9 +31,18 @@ import NewLeadPage from "../app/(dashboard)/leads/new/page";
 beforeEach(() => {
   vi.clearAllMocks();
   testState.listProjects.mockResolvedValue([{ id: "project-1", name: "DCT Heights" }]);
-  testState.listUsers.mockResolvedValue({ data: { data: [] } });
+  testState.listFields.mockResolvedValue({
+    data: {
+      data: [
+        { name: "source", fieldType: "picklist", picklistValues: [{ label: "Website", value: "WEBSITE" }] },
+        { name: "firstCampaign", fieldType: "picklist", picklistValues: [{ label: "Summer", value: "SUMMER" }] },
+        { name: "lastCampaign", fieldType: "picklist", picklistValues: [{ label: "Landing page", value: "LANDING_PAGE" }] },
+        { name: "leadInterest", fieldType: "picklist", picklistValues: [{ label: "Prospect", value: "PROSPECT" }] },
+      ],
+    },
+  });
   testState.createLead.mockResolvedValue({
-    data: { success: true, action: "EXISTING_ACTIVE", leadId: "lead-existing" },
+    data: { success: true, action: "NEW_LEAD", leadId: "lead-new" },
   });
 });
 
@@ -46,18 +53,21 @@ async function fillRequiredLeadFields() {
   fireEvent.change(screen.getByLabelText(/Lead Source/), { target: { value: "WEBSITE" } });
   fireEvent.change(screen.getByLabelText(/Project Name/), { target: { value: "project-1" } });
   fireEvent.change(screen.getByLabelText(/Lead Interest/), { target: { value: "PROSPECT" } });
-  fireEvent.change(screen.getByLabelText((content) => content.replace("*", "").trim() === "Campaign"), { target: { value: "Website" } });
-  fireEvent.change(screen.getByLabelText(/Sub Campaign/), { target: { value: "Landing page" } });
+  fireEvent.change(screen.getByLabelText((content) => content.replace("*", "").trim() === "Campaign"), { target: { value: "SUMMER" } });
+  fireEvent.change(screen.getByLabelText(/Sub Campaign/), { target: { value: "LANDING_PAGE" } });
 }
 
 describe("Create Lead duplicate handling", () => {
-  it("automatically creates an enquiry under the single matching Lead", async () => {
-    testState.checkDuplicates.mockResolvedValue({
-      data: {
-        hasDuplicates: true,
-        ambiguous: false,
-        inaccessibleMatches: false,
-        candidates: [{ id: "lead-existing", leadNumber: "LN000123" }],
+  it("shows a tenant-safe duplicate response without linking to another lead", async () => {
+    testState.createLead.mockRejectedValue({
+      response: {
+        status: 409,
+        data: {
+          success: false,
+          code: "DUPLICATE_LEAD",
+          fields: ["phone"],
+          error: "This phone number already exists in your tenant.",
+        },
       },
     });
 
@@ -70,24 +80,25 @@ describe("Create Lead duplicate handling", () => {
         lastName: "Customer",
         phone: "9876543210",
         projectId: "project-1",
-        linkToLeadId: "lead-existing",
+        firstCampaign: "SUMMER",
+        lastCampaign: "LANDING_PAGE",
       }));
-      expect(testState.push).toHaveBeenCalledWith("/leads/lead-existing");
     });
-    expect(screen.queryByText("Link enquiry")).not.toBeInTheDocument();
-    expect(testState.toast).toHaveBeenCalledWith(expect.objectContaining({ title: "Enquiry linked" }));
+    expect(testState.createLead.mock.calls[0][0]).not.toHaveProperty("linkToLeadId");
+    expect(await screen.findByRole("alert")).toHaveTextContent("This phone number already exists in your tenant.");
+    expect(testState.push).not.toHaveBeenCalled();
   });
 
-  it("does not choose arbitrarily when duplicate matches are ambiguous", async () => {
-    testState.checkDuplicates.mockResolvedValue({
-      data: {
-        hasDuplicates: true,
-        ambiguous: true,
-        inaccessibleMatches: false,
-        candidates: [
-          { id: "lead-one", leadNumber: "LN000123", name: "First Customer", matchedFields: ["phone"] },
-          { id: "lead-two", leadNumber: "LN000124", name: "Second Customer", matchedFields: ["email"] },
-        ],
+  it("reports both duplicate contact fields without exposing a matched lead", async () => {
+    testState.createLead.mockRejectedValue({
+      response: {
+        status: 409,
+        data: {
+          success: false,
+          code: "DUPLICATE_LEAD",
+          fields: ["phone", "email"],
+          error: "This phone number and email already exist in your tenant.",
+        },
       },
     });
 
@@ -95,8 +106,9 @@ describe("Create Lead duplicate handling", () => {
     await fillRequiredLeadFields();
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
-    expect(await screen.findByText(/More than one Lead may match/)).toBeInTheDocument();
-    expect(testState.createLead).not.toHaveBeenCalled();
+    expect(await screen.findByRole("alert")).toHaveTextContent("This phone number and email already exist in your tenant.");
+    expect(testState.createLead).toHaveBeenCalledOnce();
+    expect(testState.createLead.mock.calls[0][0]).not.toHaveProperty("linkToLeadId");
     expect(testState.push).not.toHaveBeenCalled();
   });
 });

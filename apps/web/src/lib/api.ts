@@ -54,9 +54,26 @@ export function getSessionToken(): string | null {
   return window.sessionStorage.getItem(SESSION_TOKEN_KEY);
 }
 
+export function getSessionTokenExpiry(): number | null {
+  const token = getSessionToken();
+  const payload = token?.split('.')[1];
+  if (!payload) return null;
+  try {
+    const base64Payload = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const decoded = atob(base64Payload.padEnd(Math.ceil(base64Payload.length / 4) * 4, '='));
+    const claims = JSON.parse(decoded) as { exp?: unknown };
+    return typeof claims.exp === 'number' && Number.isFinite(claims.exp)
+      ? claims.exp * 1000
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export function setSessionToken(token: string, updateLastActivity = true): void {
   if (typeof window === 'undefined') return;
   window.sessionStorage.setItem(SESSION_TOKEN_KEY, token);
+  redirectingToLogin = false;
   if (updateLastActivity) {
     window.sessionStorage.setItem(SESSION_LAST_ACTIVITY_KEY, String(Date.now()));
   }
@@ -106,6 +123,78 @@ export async function fetchAuthenticatedImage(url: string): Promise<string> {
   return URL.createObjectURL(await response.blob());
 }
 
+type SessionRefreshResult = { token: string } | { invalid: boolean; error?: unknown };
+let sessionRefresh: { token: string; promise: Promise<SessionRefreshResult> } | null = null;
+let redirectingToLogin = false;
+
+async function refreshAccessToken(failedToken: string): Promise<SessionRefreshResult> {
+  const currentToken = getSessionToken();
+  if (!currentToken) return { invalid: true };
+  if (currentToken !== failedToken) return { token: currentToken };
+  if (sessionRefresh?.token === failedToken) return sessionRefresh.promise;
+
+  const refreshWithRetries = async (): Promise<SessionRefreshResult> => {
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      try {
+        const response = await api.post<ApiResponse>('/api/auth/refresh');
+        const refreshedToken = response.data?.data?.token;
+        if (typeof refreshedToken === 'string') {
+          setSessionToken(refreshedToken, false);
+          return { token: refreshedToken };
+        }
+        return { invalid: false };
+      } catch (error) {
+        const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+        if (status === 409 && attempt < 5) {
+          await new Promise((resolve) => setTimeout(resolve, Math.min(100 * (2 ** attempt), 2_000)));
+          continue;
+        }
+        return { invalid: status === 401, ...(status === 401 ? {} : { error }) };
+      }
+    }
+    return { invalid: false };
+  };
+  const promise = (async (): Promise<SessionRefreshResult> => {
+    const locks = typeof navigator === 'undefined' ? undefined : navigator.locks;
+    if (locks) return locks.request('dct-crm-session-refresh', refreshWithRetries);
+    return refreshWithRetries();
+  })();
+  sessionRefresh = { token: failedToken, promise };
+  try {
+    return await promise;
+  } finally {
+    if (sessionRefresh?.promise === promise) sessionRefresh = null;
+  }
+}
+
+export async function refreshSessionToken(): Promise<void> {
+  const token = getSessionToken();
+  if (!token) return;
+  const result = await refreshAccessToken(token);
+  if ('token' in result) return;
+  if (result.invalid) {
+    if (!recoverImpersonationFailure()) redirectAfterInvalidSession(token);
+    const error = new Error('Session refresh was rejected.');
+    Object.assign(error, { response: { status: 401 } });
+    throw error;
+  }
+  if (result.error) throw result.error;
+  throw new Error('Session refresh did not return a new access token.');
+}
+
+function redirectAfterInvalidSession(token: string) {
+  if (
+    typeof window !== 'undefined' &&
+    getSessionToken() === token &&
+    window.location.pathname !== '/login' &&
+    !redirectingToLogin
+  ) {
+    redirectingToLogin = true;
+    clearSessionToken();
+    window.location.replace('/login');
+  }
+}
+
 if (
   typeof window !== 'undefined' &&
   !(window as Window & { __crmSessionFetchInstalled?: boolean }).__crmSessionFetchInstalled
@@ -131,17 +220,37 @@ if (
       headers.set('authorization', `Bearer ${token}`);
     }
 
-    return originalFetch(input, { ...init, headers }).then((response) => {
+    const replayable = !(
+      init?.body &&
+      typeof ReadableStream !== 'undefined' &&
+      init.body instanceof ReadableStream
+    );
+    const replayInput = input instanceof Request ? input.clone() : input;
+    return originalFetch(input, { ...init, headers }).then(async (response) => {
       if (
-        response.status === 401 &&
-        token &&
-        !url.pathname.includes('/api/gre/public/') &&
-        window.location.pathname !== '/login'
+        response.status !== 401 ||
+        !token ||
+        !replayable ||
+        url.pathname.includes('/api/gre/public/') ||
+        url.pathname.includes('/api/auth/refresh') ||
+        url.pathname.includes('/api/auth/login') ||
+        window.location.pathname === '/login'
       ) {
-        if (!recoverImpersonationFailure()) {
-          clearSessionToken();
-          window.location.replace('/login');
-        }
+        return response;
+      }
+
+      const refreshed = await refreshAccessToken(token);
+      if ('token' in refreshed) {
+        const retryHeaders = new Headers(headers);
+        retryHeaders.set('authorization', `Bearer ${refreshed.token}`);
+        return originalFetch(
+          replayInput instanceof Request ? replayInput.clone() : replayInput,
+          { ...init, headers: retryHeaders },
+        );
+      }
+      if (refreshed.error) throw refreshed.error;
+      if (refreshed.invalid && !recoverImpersonationFailure()) {
+        redirectAfterInvalidSession(token);
       }
       return response;
     });
@@ -187,17 +296,34 @@ api.interceptors.response.use(
     }
     return response;
   },
-  (error: AxiosError) => {
-    const requestUrl = error.config?.url || '';
+  async (error: AxiosError) => {
+    const config = error.config;
+    const requestUrl = config?.url || '';
     if (
       error.response?.status === 401 &&
       !requestUrl.includes('/api/auth/login') &&
+      !requestUrl.includes('/api/auth/refresh') &&
+      !requestUrl.includes('/api/auth/logout') &&
+      config &&
+      !(config as typeof config & { _crmSessionRetried?: boolean })._crmSessionRetried &&
       typeof window !== 'undefined' &&
       window.location.pathname !== '/login'
     ) {
-      if (!recoverImpersonationFailure()) {
-        clearSessionToken();
-        window.location.replace('/login');
+      const authorization = config.headers?.get('Authorization');
+      const failedToken = typeof authorization === 'string' && authorization.startsWith('Bearer ')
+        ? authorization.slice('Bearer '.length)
+        : getSessionToken();
+      if (failedToken) {
+        const refreshed = await refreshAccessToken(failedToken);
+        if ('token' in refreshed) {
+          (config as typeof config & { _crmSessionRetried?: boolean })._crmSessionRetried = true;
+          config.headers?.set('Authorization', `Bearer ${refreshed.token}`);
+          return api.request(config);
+        }
+        if (refreshed.error) return Promise.reject(refreshed.error);
+        if (refreshed.invalid && !recoverImpersonationFailure()) {
+          redirectAfterInvalidSession(failedToken);
+        }
       }
     }
     return Promise.reject(error);
@@ -653,6 +779,8 @@ export const objectDefinitionApi = {
 export const dataAdministrationApi = {
   import: (objectName: string, fields: string[], csv: string) =>
     api.post<ApiResponse>('/api/data-administration/import', { objectName, fields, csv }),
+  update: (objectName: string, payload: Record<string, any>) =>
+    api.post<ApiResponse>('/api/data-administration/update', { objectName, ...payload }),
   export: (objectName: string, params?: Record<string, any>) =>
     api.get(`/api/data-administration/export/${objectName}`, {
       params,
@@ -713,10 +841,8 @@ export const telephonySettingsApi = {
     api.put<ApiResponse>('/api/setup/telephony', data, { params: tenantId ? { tenantId } : undefined }),
   checkEmbedding: (origin: string, tenantId?: string) =>
     api.post<ApiResponse>('/api/setup/telephony/check-embedding', { origin }, { params: tenantId ? { tenantId } : undefined }),
-  testConnection: (tenantId?: string) =>
-    api.post<ApiResponse>('/api/setup/telephony/test-connection', {}, { params: tenantId ? { tenantId } : undefined }),
-  testCall: (tenantId?: string) =>
-    api.post<ApiResponse>('/api/setup/telephony/test-call', {}, { params: tenantId ? { tenantId } : undefined }),
+  openDialpadWithMyNumber: (tenantId?: string) =>
+    api.post<ApiResponse>('/api/setup/telephony/open-dialpad-with-my-number', {}, { params: tenantId ? { tenantId } : undefined }),
   agents: (tenantId?: string) =>
     api.get<ApiResponse>('/api/setup/telephony/agents', { params: tenantId ? { tenantId } : undefined }),
   updateAgents: (data: { userIds?: string[]; profileId?: string; enabled: boolean }, tenantId?: string) =>
@@ -727,12 +853,10 @@ export const telephonySettingsApi = {
     api.get<ApiResponse>('/api/setup/telephony/logs', { params: tenantId ? { tenantId } : undefined }),
 };
 
-export const clickToCallApi = {
-  place: (data: { leadId: string; phoneField?: 'phone' | 'mobile' | 'secondaryPhone' }) =>
-    api.post<ApiResponse>('/api/telephony/click-to-call', data),
+export const telephonyDialpadApi = {
   clientConfig: () =>
     api.get<ApiResponse>('/api/telephony/client-config'),
-  dialpadCallStarted: (data: { leadId: string; phoneField: 'phone' | 'mobile' | 'secondaryPhone'; taskId?: string } | { number: string }) =>
+  dialpadCallStarted: (data: { leadId: string; phoneField: 'phone' | 'mobile' | 'secondaryPhone'; taskId?: string }) =>
     api.post<ApiResponse>('/api/telephony/dialpad-call-started', data),
   dialpadEvent: (data: {
     event: 'BIZCALL_AGENT_REGISTERED' | 'BIZCALL_CALL_STARTING' | 'BIZCALL_CALL_CONNECTED' | 'BIZCALL_CALL_ENDED' | 'BIZCALL_DISPOSITION_SUBMITTED';

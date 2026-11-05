@@ -51,6 +51,15 @@ describe('report validation', () => {
     })).toThrow(/Invalid operator|Unknown report field/i);
   });
 
+  it('supports Lead Interest as a report column and filter', () => {
+    expect(() => validateReportRequest({
+      tenantId: 'tenant-1',
+      objectName: 'Lead',
+      columns: ['leadInterest'],
+      filters: [{ field: 'leadInterest', operator: 'equals', value: 'HOT' }],
+    })).not.toThrow();
+  });
+
   it('rejects invalid custom date ranges', () => {
     expect(() => validateReportRequest({
       tenantId: 'tenant-1',

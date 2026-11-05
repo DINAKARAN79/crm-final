@@ -2,8 +2,11 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Prisma } from '@prisma/client';
 import {
   acquireLeadDuplicateLocks,
+  duplicateLeadFields,
+  duplicateLeadMessage,
   findLeadDuplicates,
   findLeadDuplicatesBatch,
+  leadDuplicateContactKeys,
   normalizeLeadEmail,
   normalizeLeadPhone,
   validateLeadContactInput,
@@ -33,6 +36,13 @@ describe('lead contact normalization', () => {
     expect(normalizeLeadEmail('  SALES@Example.COM ')).toBe('sales@example.com');
   });
 
+  it('creates tenant-comparison keys from formatted phones and case-insensitive emails', () => {
+    expect(leadDuplicateContactKeys({
+      phones: [{ field: 'phone', value: '+91 (987) 654-3210', countryCode: '91' }],
+      emails: [{ field: 'email', value: ' SALES@Example.COM ' }],
+    })).toEqual(['PHONE:+919876543210', 'EMAIL:sales@example.com']);
+  });
+
   it('returns field-specific validation errors for malformed contacts and calling codes', () => {
     expect(validateLeadContactInput({
       phones: [
@@ -45,6 +55,36 @@ describe('lead contact normalization', () => {
       { field: 'secondaryPhone', message: 'Secondary phone must contain 7 to 12 national digits and use a valid phone format.' },
       { field: 'secondaryEmail', message: 'Enter a valid email address.' },
     ]);
+  });
+});
+
+describe('duplicate contact responses', () => {
+  it('reports both duplicate contact fields without exposing a lead record', () => {
+    const matches = [{
+      lead: {
+        id: 'private-lead-id',
+        leadNumber: 'LN000001',
+        firstName: 'Private',
+        lastName: 'Person',
+        company: 'Private Company',
+        status: 'NEW',
+        ownerId: 'private-owner',
+        projectId: null,
+        createdAt: new Date(),
+      },
+      matchedFields: ['phone', 'email'],
+      ambiguous: false,
+      evidence: [
+        { contactKey: 'PHONE:+919876543210', field: 'phone', ambiguous: false },
+        { contactKey: 'EMAIL:sales@example.com', field: 'email', ambiguous: false },
+      ],
+    }];
+
+    expect(duplicateLeadFields(matches)).toEqual(['phone', 'email']);
+    expect(duplicateLeadMessage(duplicateLeadFields(matches)))
+      .toBe('This phone number and email already exist in your tenant.');
+    expect(JSON.stringify({ code: 'DUPLICATE_LEAD', fields: duplicateLeadFields(matches) }))
+      .not.toContain('private-lead-id');
   });
 });
 

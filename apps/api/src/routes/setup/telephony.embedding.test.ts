@@ -40,21 +40,9 @@ vi.mock('../../middleware/auth', () => ({
   },
 }));
 vi.mock('../../middleware/audit', () => ({ auditLog: vi.fn() }));
-vi.mock('../../services/clickToCall', () => ({
-  probeTelephonyConnection: vi.fn(),
-  buildClickToCallPayload: vi.fn(),
-}));
-vi.mock('../../services/telephonyCredentials', () => ({
-  TelephonyCredentialError: class TelephonyCredentialError extends Error {},
-  decryptTelephonyToken: vi.fn(),
-}));
-vi.mock('../../services/telephonyUrl', () => ({
-  TelephonyUrlError: class TelephonyUrlError extends Error {},
-  assertClickToCallUrl: vi.fn(),
-}));
 vi.mock('../../services/telephonySettings', () => ({
   getTelephonySettings: vi.fn(),
-  listTelephonyRequestLogs: vi.fn(),
+  listRecentDialpadCalls: vi.fn(),
   saveTelephonySettings: vi.fn(),
   telephonySettingsSchema: { parse: vi.fn() },
 }));

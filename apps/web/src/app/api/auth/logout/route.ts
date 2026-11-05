@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getUpstreamFailureStatus } from '@/lib/upstream-error';
 
 export const dynamic = 'force-dynamic';
 
@@ -16,9 +17,17 @@ export async function POST(request: NextRequest) {
     const response = await fetch(`${BACKEND_URL}/api/auth/logout`, {
       method: 'POST',
       headers,
+      signal: AbortSignal.timeout(30_000),
     });
 
     const data = await response.json();
+
+    if (!response.ok) {
+      return NextResponse.json(
+        { success: false, error: data.error || 'Logout failed' },
+        { status: response.status }
+      );
+    }
 
     const res = NextResponse.json(data);
 
@@ -30,9 +39,15 @@ export async function POST(request: NextRequest) {
     return res;
   } catch (error) {
     console.error('Logout proxy error:', error);
+    const status = getUpstreamFailureStatus(error);
     return NextResponse.json(
-      { success: false, error: 'Unable to connect to authentication service' },
-      { status: 502 }
+      {
+        success: false,
+        error: status === 504
+          ? 'Authentication service timed out'
+          : 'Unable to connect to authentication service',
+      },
+      { status }
     );
   }
 }

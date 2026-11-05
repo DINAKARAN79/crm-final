@@ -4,7 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, Loader2 } from "lucide-react";
-import { leadApi, projectApi } from "@/lib/api";
+import { leadApi, objectDefinitionApi, projectApi } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -16,38 +16,8 @@ interface Project {
   name: string;
 }
 
-interface SalesUser {
-  id: string;
-  firstName: string;
-  lastName: string;
-  email?: string;
-  isActive?: boolean;
-  profile?: { name: string } | null;
-}
-
-const SOURCE_OPTIONS = [
-  { label: "Website", value: "WEBSITE" },
-  { label: "Facebook", value: "FACEBOOK" },
-  { label: "Referral", value: "REFERRAL" },
-  { label: "Cold Call", value: "COLD_CALL" },
-  { label: "Advertisement", value: "ADVERTISEMENT" },
-  { label: "Walk-in", value: "WALK_IN" },
-  { label: "Portal", value: "PORTAL" },
-  { label: "Instagram", value: "INSTAGRAM" },
-  { label: "Twitter", value: "TWITTER" },
-  { label: "WhatsApp", value: "WHATSAPP" },
-  { label: "YouTube", value: "YOUTUBE" },
-  { label: "Other", value: "OTHER" },
-];
-
-const LEAD_INTEREST_OPTIONS = [
-  { label: "Prospect", value: "PROSPECT" },
-  { label: "Hot", value: "HOT" },
-  { label: "Warm", value: "WARM" },
-  { label: "Unable to Connect", value: "UNABLE_TO_CONNECT" },
-  { label: "Dropped", value: "DROPPED" },
-  { label: "Cold", value: "COLD" },
-];
+type PicklistOption = { label: string; value: string };
+type LeadPicklists = Record<"source" | "firstCampaign" | "lastCampaign" | "leadInterest", PicklistOption[]>;
 
 const COUNTRY_OPTIONS = [
   { name: "India", code: "91" },
@@ -93,13 +63,14 @@ export default function NewLeadPage() {
   const [isLoading, setIsLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = React.useState<Record<string, string>>({});
-  const [duplicateReview, setDuplicateReview] = React.useState<{
-    ambiguous: boolean;
-    inaccessibleMatches: boolean;
-    candidates: Array<{ id: string; leadNumber: string | null; name: string; projectName: string | null; matchedFields: string[] }>;
-  } | null>(null);
   const [projects, setProjects] = React.useState<Project[]>([]);
-  const [salesUsers, setSalesUsers] = React.useState<SalesUser[]>([]);
+  const [leadInterestRequired, setLeadInterestRequired] = React.useState(false);
+  const [picklists, setPicklists] = React.useState<LeadPicklists>({
+    source: [],
+    firstCampaign: [],
+    lastCampaign: [],
+    leadInterest: [],
+  });
   const [formData, setFormData] = React.useState({
     salutation: "",
     firstName: "",
@@ -119,24 +90,40 @@ export default function NewLeadPage() {
     leadInterest: "",
     campaign: "",
     subCampaign: "",
-    salesUserId: "",
   });
 
   React.useEffect(() => {
     let active = true;
     const loadOptions = async () => {
       try {
-        const [projectsResponse, usersResponse] = await Promise.all([
+        const [projectsResponse, fieldsResponse] = await Promise.all([
           projectApi.listAll({ isActive: true }),
-          leadApi.salesUsers(),
+          objectDefinitionApi.fields("Lead"),
         ]);
-        const userResponseData = usersResponse.data.data;
-        const users = Array.isArray(userResponseData)
-          ? userResponseData
-          : [];
+        const fields = Array.isArray(fieldsResponse.data?.data) ? fieldsResponse.data.data : [];
+        const nextPicklists: LeadPicklists = {
+          source: [],
+          firstCampaign: [],
+          lastCampaign: [],
+          leadInterest: [],
+        };
+        for (const field of fields) {
+          if (field.fieldType !== "picklist" || !(field.name in nextPicklists)) continue;
+          nextPicklists[field.name as keyof LeadPicklists] = (field.picklistValues || [])
+            .filter((option: { isActive?: boolean }) => option.isActive !== false)
+            .map((option: { label: string; value: string }) => ({
+              label: option.label,
+              value: option.value,
+            }));
+        }
+        const leadInterestField = fields.find(
+          (field: { name: string; fieldType: string; required?: boolean }) =>
+            field.name === "leadInterest" && field.fieldType === "picklist",
+        );
         if (active) {
           setProjects(projectsResponse);
-          setSalesUsers(users as SalesUser[]);
+          setPicklists(nextPicklists);
+          setLeadInterestRequired(leadInterestField?.required === true);
         }
       } catch (reason: any) {
         if (active) {
@@ -158,7 +145,6 @@ export default function NewLeadPage() {
     setFormData((current) => ({ ...current, [field]: value }));
     setError(null);
     setFieldErrors({});
-    setDuplicateReview(null);
   };
 
   const handleCountryChange = (country: string) => {
@@ -179,8 +165,10 @@ export default function NewLeadPage() {
       ["phone", "Primary Phone"],
       ["source", "Lead Source"],
       ["projectId", "Project Name"],
-      ["leadInterest", "Lead Interest"],
     ].filter(([key]) => !formData[key as keyof typeof formData].trim());
+    if (leadInterestRequired && !formData.leadInterest.trim()) {
+      missing.push(["leadInterest", "Lead Interest"]);
+    }
     if (missing.length) {
       setError(`${missing.map(([, label]) => label).join(", ")} ${missing.length === 1 ? "is" : "are"} required.`);
       return;
@@ -189,7 +177,6 @@ export default function NewLeadPage() {
     setIsSubmitting(true);
     setError(null);
     setFieldErrors({});
-    setDuplicateReview(null);
     try {
       const displayName = [formData.firstName.trim(), formData.lastName.trim()].filter(Boolean).join(" ");
       const payload = {
@@ -210,37 +197,12 @@ export default function NewLeadPage() {
         source: formData.source,
         projectId: formData.projectId,
         leadInterest: formData.leadInterest,
-        campaign: formData.campaign.trim() || undefined,
-        subCampaign: formData.subCampaign.trim() || undefined,
-        salesUserId: formData.salesUserId || undefined,
+        firstCampaign: formData.campaign || undefined,
+        lastCampaign: formData.subCampaign || undefined,
+        campaign: formData.campaign || undefined,
+        subCampaign: formData.subCampaign || undefined,
         statusId: "1",
       };
-      const duplicateResponse = await leadApi.checkDuplicates(payload);
-      const duplicateData = duplicateResponse.data as {
-        hasDuplicates?: boolean;
-        ambiguous?: boolean;
-        inaccessibleMatches?: boolean;
-        candidates?: Array<{ id: string; leadNumber: string | null; name: string; projectName: string | null; matchedFields: string[] }>;
-        fieldErrors?: Array<{ field: string; message: string }>;
-        error?: string;
-      };
-      if (duplicateData.hasDuplicates) {
-        const candidates = duplicateData.candidates || [];
-        if (
-          !duplicateData.ambiguous &&
-          !duplicateData.inaccessibleMatches &&
-          candidates.length === 1
-        ) {
-          await linkDuplicate(candidates[0].id);
-          return;
-        }
-        setDuplicateReview({
-          ambiguous: Boolean(duplicateData.ambiguous) || candidates.length > 1,
-          inaccessibleMatches: Boolean(duplicateData.inaccessibleMatches),
-          candidates,
-        });
-        return;
-      }
       const response = await leadApi.create(payload);
       const responseData: { success: boolean; error?: string; action?: string } = response.data;
       if (!responseData.success) {
@@ -256,53 +218,16 @@ export default function NewLeadPage() {
       if (apiFieldErrors?.length) {
         setFieldErrors(Object.fromEntries(apiFieldErrors.map(({ field, message }) => [field, message])));
       }
+      const duplicateFields = reason?.response?.data?.fields as string[] | undefined;
+      if (reason?.response?.data?.code === "DUPLICATE_LEAD" && duplicateFields?.length) {
+        const duplicateMessage = reason.response.data.error || "A lead with these contact details already exists in your tenant.";
+        setFieldErrors(Object.fromEntries(duplicateFields.map((field) => [field, duplicateMessage])));
+      }
       const message =
         reason?.response?.data?.error ||
         reason?.response?.data?.message ||
         reason?.message ||
         "Failed to create lead.";
-      setError(message);
-      toast({ title: "Error", description: message, variant: "destructive" });
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const linkDuplicate = async (leadId: string) => {
-    setIsSubmitting(true);
-    setError(null);
-    try {
-      const displayName = [formData.firstName.trim(), formData.lastName.trim()].filter(Boolean).join(" ");
-      const response = await leadApi.create({
-        salutation: formData.salutation || undefined,
-        firstName: formData.firstName.trim() || undefined,
-        lastName: formData.lastName.trim(),
-        company: displayName,
-        phone: formData.phone.trim(),
-        secondaryPhone: formData.secondaryPhone.trim() || undefined,
-        tertiaryPhone: formData.tertiaryPhone.trim() || undefined,
-        country: formData.country,
-        countryCode: formData.countryCode,
-        secondaryCountryCode: formData.secondaryCountryCode,
-        tertiaryCountryCode: formData.tertiaryCountryCode,
-        email: formData.email.trim() || undefined,
-        secondaryEmail: formData.secondaryEmail.trim() || undefined,
-        tertiaryEmail: formData.tertiaryEmail.trim() || undefined,
-        source: formData.source,
-        projectId: formData.projectId,
-        leadInterest: formData.leadInterest,
-        campaign: formData.campaign.trim() || undefined,
-        subCampaign: formData.subCampaign.trim() || undefined,
-        salesUserId: formData.salesUserId || undefined,
-        statusId: "1",
-        linkToLeadId: leadId,
-      });
-      const responseData: { success: boolean; action?: string } = response.data;
-      if (!responseData.success) throw new Error("Unable to link this enquiry to the existing Lead.");
-      toast({ title: "Enquiry linked", description: "The enquiry was added to the existing Lead." });
-      router.push(`/leads/${leadId}`);
-    } catch (reason: any) {
-      const message = reason?.response?.data?.error || reason?.message || "Unable to link the enquiry.";
       setError(message);
       toast({ title: "Error", description: message, variant: "destructive" });
     } finally {
@@ -335,43 +260,10 @@ export default function NewLeadPage() {
                 {error}
               </div>
             )}
-            {duplicateReview && (
-              <div role="alert" className="space-y-3 rounded-md border border-amber-500/50 bg-amber-50 p-4 text-sm text-amber-950 dark:bg-amber-950/20 dark:text-amber-100">
-                <p className="font-medium">
-                  {duplicateReview.ambiguous
-                    ? "More than one Lead may match these contact details, or a stored phone is missing its country code. This enquiry cannot be linked automatically; ask an administrator to review it."
-                    : duplicateReview.inaccessibleMatches
-                      ? "A possible duplicate exists, but you do not have permission to view its Lead details. Contact an administrator before proceeding."
-                      : "A matching Lead was found. Link this enquiry to the existing record instead of creating a second Lead."}
-                </p>
-                {duplicateReview.candidates.map((candidate) => (
-                  <div key={candidate.id} className="flex flex-wrap items-center justify-between gap-3 rounded border bg-background p-3 text-foreground">
-                    <div>
-                      <p className="font-medium">{candidate.leadNumber || candidate.id} · {candidate.name}</p>
-                      {candidate.projectName && <p className="text-xs text-muted-foreground">Existing project: {candidate.projectName}</p>}
-                      <p className="text-xs text-muted-foreground">Matched: {candidate.matchedFields.join(", ")}</p>
-                    </div>
-                    <div className="flex gap-2">
-                      <Button type="button" variant="outline" asChild>
-                        <Link href={`/leads/${candidate.id}`}>Open Lead</Link>
-                      </Button>
-                      {!duplicateReview.ambiguous && !duplicateReview.inaccessibleMatches && (
-                        <Button type="button" disabled={isSubmitting} onClick={() => void linkDuplicate(candidate.id)}>
-                          Link enquiry
-                        </Button>
-                      )}
-                    </div>
-                  </div>
-                ))}
-                <Button type="button" variant="ghost" onClick={() => setDuplicateReview(null)}>
-                  Cancel
-                </Button>
-              </div>
-            )}
             {isLoading ? (
               <div className="flex min-h-48 items-center justify-center gap-2 text-sm text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" />
-                Loading projects and sales users...
+                Loading project and field options...
               </div>
             ) : (
               <>
@@ -453,10 +345,10 @@ export default function NewLeadPage() {
                   <Field id="tertiary-email" label="Tertiary Email" error={fieldErrors.tertiaryEmail}>
                     <Input id="tertiary-email" type="email" aria-invalid={Boolean(fieldErrors.tertiaryEmail)} value={formData.tertiaryEmail} onChange={(event) => updateField("tertiaryEmail", event.target.value)} />
                   </Field>
-                  <Field id="lead-source" label="Lead Source" required>
-                    <select id="lead-source" className={CONTROL_CLASS} value={formData.source} onChange={(event) => updateField("source", event.target.value)}>
+                  <Field id="lead-source" label="Lead Source" required error={fieldErrors.source}>
+                    <select id="lead-source" aria-invalid={Boolean(fieldErrors.source)} className={CONTROL_CLASS} value={formData.source} onChange={(event) => updateField("source", event.target.value)}>
                       <option value="">--None--</option>
-                      {SOURCE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                      {picklists.source.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                     </select>
                   </Field>
                   <Field id="project-name" label="Project Name" required>
@@ -465,27 +357,22 @@ export default function NewLeadPage() {
                       {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
                     </select>
                   </Field>
-                  <Field id="lead-interest" label="Lead Interest" required>
-                    <select id="lead-interest" className={CONTROL_CLASS} value={formData.leadInterest} onChange={(event) => updateField("leadInterest", event.target.value)}>
+                  <Field id="lead-interest" label="Lead Interest" required={leadInterestRequired} error={fieldErrors.leadInterest}>
+                    <select id="lead-interest" aria-invalid={Boolean(fieldErrors.leadInterest)} className={CONTROL_CLASS} value={formData.leadInterest} onChange={(event) => updateField("leadInterest", event.target.value)}>
                       <option value="">--None--</option>
-                      {LEAD_INTEREST_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                      {picklists.leadInterest.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                     </select>
                   </Field>
-                  <Field id="campaign" label="Campaign">
-                    <Input id="campaign" value={formData.campaign} onChange={(event) => updateField("campaign", event.target.value)} />
+                  <Field id="campaign" label="Campaign" error={fieldErrors.firstCampaign}>
+                    <select id="campaign" aria-invalid={Boolean(fieldErrors.firstCampaign)} className={CONTROL_CLASS} value={formData.campaign} onChange={(event) => updateField("campaign", event.target.value)}>
+                      <option value="">--None--</option>
+                      {picklists.firstCampaign.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                    </select>
                   </Field>
-                  <Field id="sub-campaign" label="Sub Campaign">
-                    <Input id="sub-campaign" value={formData.subCampaign} onChange={(event) => updateField("subCampaign", event.target.value)} />
-                  </Field>
-                  <Field id="sales-user" label="Sales User">
-                    <select id="sales-user" className={CONTROL_CLASS} value={formData.salesUserId} onChange={(event) => updateField("salesUserId", event.target.value)}>
-                      <option value="">--Auto assign--</option>
-                      {salesUsers.map((salesUser) => (
-                        <option key={salesUser.id} value={salesUser.id}>
-                          {[salesUser.firstName, salesUser.lastName].filter(Boolean).join(" ")}
-                          {salesUser.profile?.name ? ` (${salesUser.profile.name})` : ""}
-                        </option>
-                      ))}
+                  <Field id="sub-campaign" label="Sub Campaign" error={fieldErrors.lastCampaign}>
+                    <select id="sub-campaign" aria-invalid={Boolean(fieldErrors.lastCampaign)} className={CONTROL_CLASS} value={formData.subCampaign} onChange={(event) => updateField("subCampaign", event.target.value)}>
+                      <option value="">--None--</option>
+                      {picklists.lastCampaign.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                     </select>
                   </Field>
                 </div>

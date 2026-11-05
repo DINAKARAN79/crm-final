@@ -1,12 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   BIZCALL_DIALPAD_WINDOW_NAME,
-  buildBizcallDialpadUrl,
   buildBizcallNamespaceKey,
   claimDialpadLock,
   isDialpadLockStale,
   isTrustedBizcallMessage,
-  openBizcallDialpad,
   maskDialpadNumber,
   sanitizeDialpadFields,
   sendDialerCommand,
@@ -47,43 +45,6 @@ describe("Bizcall dialpad browser helpers", () => {
     expect(JSON.parse(storage.getItem("lock") || "{}").ownerId).toBe("current-tab");
   });
 
-  it("builds the same identity-scoped dialpad tab URL with the CRM user and theme", () => {
-    const openWindow = vi.fn();
-    const url = "https://bizcall.cxteletech.com/embed/dialpad?existing=value";
-    openBizcallDialpad(url, "crm-user-42", "tenant-1", "DARK", openWindow);
-    openBizcallDialpad(url, "crm-user-42", "tenant-1", "DARK", openWindow);
-    openBizcallDialpad(url, "crm-user-42", "tenant-2", "DARK", openWindow);
-
-    expect(openWindow).toHaveBeenCalledTimes(3);
-    expect(openWindow).toHaveBeenNthCalledWith(
-      1,
-      "https://bizcall.cxteletech.com/embed/dialpad?existing=value&userId=crm-user-42&theme=dark",
-      `${BIZCALL_DIALPAD_WINDOW_NAME}-tenant-1-crm-user-42`,
-    );
-    expect(openWindow.mock.calls[0][1]).toBe(openWindow.mock.calls[1][1]);
-    expect(openWindow.mock.calls[0][1]).not.toBe(openWindow.mock.calls[2][1]);
-  });
-
-  it("serializes CRM theme as light and includes the required user id", () => {
-    const result = new URL(buildBizcallDialpadUrl(
-      "https://bizcall.cxteletech.com/embed/dialpad",
-      "crm-user-7",
-      "CRM",
-    ));
-    expect(result.searchParams.get("userId")).toBe("crm-user-7");
-    expect(result.searchParams.get("theme")).toBe("light");
-  });
-
-  it("uses the configured number query only for dialpad prefill", () => {
-    const result = new URL(buildBizcallDialpadUrl(
-      "https://bizcall.cxteletech.com/embed/dialpad",
-      "crm-user-7",
-      "CRM",
-      "+14155552671",
-    ));
-    expect(result.searchParams.get("number")).toBe("+14155552671");
-  });
-
   it("rejects messages from other origins or other windows", () => {
     const dialpadWindow = {};
     expect(isTrustedBizcallMessage("https://bizcall.cxteletech.com", dialpadWindow, "https://bizcall.cxteletech.com", dialpadWindow)).toBe(true);
@@ -91,46 +52,19 @@ describe("Bizcall dialpad browser helpers", () => {
     expect(isTrustedBizcallMessage("https://bizcall.cxteletech.com", {}, "https://bizcall.cxteletech.com", dialpadWindow)).toBe(false);
   });
 
-  it("sends the documented INIT, DIAL, and HANGUP shapes only to the configured origin", () => {
+  it("sends only HANGUP to the configured dialpad origin", () => {
     const target = { postMessage: vi.fn() };
     const origin = "https://bizcall.cxteletech.com";
-    expect(sendDialerCommand(target, origin, true, { type: "INIT_USER", userId: "agent-1" })).toEqual({ ok: true });
-    expect(sendDialerCommand(target, origin, true, {
-      type: "DIAL",
-      number: "+14155552671",
-      recordId: "lead-1",
-      leadName: "Lead One",
-      taskId: "followup-1",
-      tenantId: "tenant-1",
-    })).toEqual({ ok: true });
     expect(sendDialerCommand(target, origin, true, { type: "BIZCALL_HANGUP" })).toEqual({ ok: true });
-    expect(target.postMessage.mock.calls).toEqual([
-      [{ type: "INIT_USER", userId: "agent-1" }, origin],
-      [{
-        type: "DIAL",
-        number: "+14155552671",
-        recordId: "lead-1",
-        leadName: "Lead One",
-        taskId: "followup-1",
-        tenantId: "tenant-1",
-      }, origin],
-      [{ type: "BIZCALL_HANGUP" }, origin],
-    ]);
+    expect(target.postMessage).toHaveBeenCalledOnce();
+    expect(target.postMessage).toHaveBeenCalledWith({ type: "BIZCALL_HANGUP" }, origin);
   });
 
-  it("refuses commands until loaded and rejects unsafe origins or invalid dial payloads", () => {
+  it("refuses commands until loaded and rejects unsafe origins", () => {
     const target = { postMessage: vi.fn() };
-    expect(sendDialerCommand(target, "https://bizcall.cxteletech.com", false, {
-      type: "INIT_USER",
-      userId: "agent-1",
-    })).toMatchObject({ ok: false, reason: "IFRAME_NOT_READY" });
+    expect(sendDialerCommand(target, "https://bizcall.cxteletech.com", false, { type: "BIZCALL_HANGUP" }))
+      .toMatchObject({ ok: false, reason: "IFRAME_NOT_READY" });
     expect(sendDialerCommand(target, "*", true, { type: "BIZCALL_HANGUP" })).toMatchObject({ ok: false, reason: "INVALID_ORIGIN" });
-    expect(sendDialerCommand(target, "https://bizcall.cxteletech.com", true, {
-      type: "DIAL",
-      number: "4155552671",
-      recordId: "",
-      leadName: "",
-    })).toMatchObject({ ok: false, reason: "INVALID_COMMAND" });
     expect(target.postMessage).not.toHaveBeenCalled();
   });
 

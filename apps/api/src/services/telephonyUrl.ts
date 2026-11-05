@@ -1,4 +1,3 @@
-export const DEFAULT_CLICK_TO_CALL_URL = 'https://bizcall.cxteletech.com/api/integration/click2call';
 export const DEFAULT_DIALPAD_URL = process.env.DIALPAD_URL?.trim() || 'https://bizcall.cxteletech.com/embed/dialpad';
 
 export class TelephonyUrlError extends Error {
@@ -41,44 +40,6 @@ export function isPrivateHostname(hostname: string) {
   return false;
 }
 
-export function migrateClickToCallUrl(value: string) {
-  const trimmed = value.trim().replace(/\/+$/, '');
-  if (!trimmed) return DEFAULT_CLICK_TO_CALL_URL;
-  if (/\/api\/(?:dialer|integration)\/click2call$/i.test(trimmed)) return trimmed;
-  return `${trimmed}/api/integration/click2call`;
-}
-
-export function assertClickToCallUrl(
-  value: string,
-  options: { env?: string; allowTestUrl?: boolean } = {},
-) {
-  const env = options.env ?? process.env.NODE_ENV;
-  let url: URL;
-  try {
-    url = new URL(value.trim());
-  } catch {
-    throw new TelephonyUrlError('Enter the full click-to-call URL.');
-  }
-  if (url.username || url.password) {
-    throw new TelephonyUrlError('The click-to-call URL cannot include a username or password.');
-  }
-  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-    throw new TelephonyUrlError('Enter the full click-to-call URL.');
-  }
-  if ([...url.searchParams.keys()].some((key) => key.toLowerCase() === 'api_key')) {
-    throw new TelephonyUrlError('Do not put the Bizcall API key in the URL. Configure it in the API-key header.');
-  }
-  if (env === 'production' && url.protocol !== 'https:') {
-    throw new TelephonyUrlError('The click-to-call URL must use HTTPS.');
-  }
-  const blockedHost = isPrivateHostname(url.hostname);
-  const testException = env === 'development' && options.allowTestUrl === true && blockedHost;
-  if (blockedHost && !testException) {
-    throw new TelephonyUrlError('The click-to-call URL cannot use localhost or a private network address.');
-  }
-  return url.toString();
-}
-
 export function assertDialpadUrl(value: string, options: { env?: string } = {}) {
   let url: URL;
   try {
@@ -104,4 +65,26 @@ export function assertDialpadUrl(value: string, options: { env?: string } = {}) 
 
 export function dialpadOrigin(value: string) {
   return new URL(value).origin;
+}
+
+export function buildDialpadUrl(
+  value: string,
+  options: {
+    userId: string;
+    number?: string;
+    autoDial?: boolean;
+    theme: 'CRM' | 'LIGHT' | 'DARK';
+  },
+) {
+  const url = new URL(assertDialpadUrl(value));
+  url.searchParams.set('userId', options.userId);
+  if (options.number) {
+    url.searchParams.set('number', options.number);
+    url.searchParams.set('autocall', String(options.autoDial === true));
+  } else {
+    url.searchParams.delete('number');
+    url.searchParams.delete('autocall');
+  }
+  url.searchParams.set('theme', options.theme === 'DARK' ? 'dark' : 'light');
+  return url.toString();
 }

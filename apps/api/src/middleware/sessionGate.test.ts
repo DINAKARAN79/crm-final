@@ -9,21 +9,25 @@ const state = vi.hoisted(() => ({
   endedAt: null as Date | null,
   endReason: null as string | null,
   lookups: 0,
+  failUserLookup: false,
 }));
 
 vi.mock('@dct-crm/db', () => ({
   prisma: {
     user: {
-      findUnique: async () => ({
-        id: 'user-1',
-        email: 'admin@example.test',
-        tenantId: 'tenant-1',
-        isActive: true,
-        isSuperAdmin: false,
-        profileId: 'profile-1',
-        profile: { id: 'profile-1', name: 'Admin', isAdmin: true },
-        tenant: { isActive: true, companyStartDate: null, companyExpiryDate: null },
-      }),
+      findUnique: async () => {
+        if (state.failUserLookup) throw new Error('database connection unavailable');
+        return {
+          id: 'user-1',
+          email: 'admin@example.test',
+          tenantId: 'tenant-1',
+          isActive: true,
+          isSuperAdmin: false,
+          profileId: 'profile-1',
+          profile: { id: 'profile-1', name: 'Admin', isAdmin: true },
+          tenant: { isActive: true, companyStartDate: null, companyExpiryDate: null },
+        };
+      },
     },
     userSession: {
       findUnique: async () => {
@@ -54,6 +58,7 @@ describe('authenticate session gate', () => {
     state.endedAt = null;
     state.endReason = null;
     state.lookups = 0;
+    state.failUserLookup = false;
   });
 
   afterEach(() => {
@@ -87,5 +92,28 @@ describe('authenticate session gate', () => {
     const ended = await fetch(`http://127.0.0.1:${port}/ping`, { headers });
     expect(ended.status).toBe(401);
     expect(await ended.json()).toMatchObject({ error: 'Session ended' });
+  });
+
+  it('returns a dependency error instead of misclassifying database failures as authentication failures', async () => {
+    const app = express();
+    app.get('/ping', authenticate, (_req, res) => res.json({ ok: true }));
+    const port = listen(app);
+    const token = generateToken({
+      id: 'user-1',
+      email: 'admin@example.test',
+      tenantId: 'tenant-1',
+      isSuperAdmin: false,
+    });
+    state.failUserLookup = true;
+
+    const response = await fetch(`http://127.0.0.1:${port}/ping`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      success: false,
+      error: 'Authentication service temporarily unavailable',
+    });
   });
 });

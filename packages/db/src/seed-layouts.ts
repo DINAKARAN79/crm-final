@@ -18,7 +18,7 @@ const LEAD_LAYOUT_SECTIONS: Section[] = [
   },
   {
     name: 'Lead Information',
-    fields: ['projectId', 'source', 'status', 'rating', 'description'],
+    fields: ['projectId', 'source', 'firstCampaign', 'lastCampaign', 'leadInterest', 'status', 'rating', 'description'],
   },
   {
     name: 'Address',

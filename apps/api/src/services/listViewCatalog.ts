@@ -80,6 +80,7 @@ const FIELDS: Record<ListModule, FieldDef[]> = {
   LEAD: [
     { key: 'status', label: 'Lead Status', kind: 'enum', operators: LEAD_ENUM_OPS, options: leadStatuses, paths: ['status'] },
     { key: 'source', label: 'Source', kind: 'enum', operators: LEAD_ENUM_OPS, options: leadSources, paths: ['source'] },
+    { key: 'leadInterest', label: 'Lead Interest', kind: 'string', operators: STRING_OPS, paths: ['leadInterest'] },
     { key: 'ownerId', label: 'Assigned To', kind: 'user', operators: LEAD_USER_OPS, paths: ['ownerId'] },
     { key: 'company', label: 'Company', kind: 'string', operators: STRING_OPS, paths: ['company'] },
     { key: 'phone', label: 'Phone', kind: 'string', operators: STRING_OPS, paths: ['phone'] },

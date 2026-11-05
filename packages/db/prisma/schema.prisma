@@ -712,7 +712,9 @@ model Lead {
   lastName       String
   title          String?
   email          String?
+  normalizedEmail String?
   phone          String?
+  normalizedPhone String?
   countryCode    String?
   mobile         String?
   tertiaryPhone  String?
@@ -728,7 +730,7 @@ model Lead {
   numberOfEmployees Int?
 
   // Standard Lead Fields - Lead Management
-  source            LeadSource @default(OTHER)
+  source            String     @default("OTHER")
   status            LeadStatus @default(NEW)
   rating            Rating?
   leadInterest      String?
@@ -803,6 +805,8 @@ model Lead {
   @@index([tenantId])
   @@index([tenantId, status])
   @@index([tenantId, ownerId])
+  @@unique([tenantId, normalizedEmail])
+  @@unique([tenantId, normalizedPhone])
   @@index([tenantId, email])
   @@index([tenantId, phone])
   @@index([tenantId, company])
@@ -2522,6 +2526,8 @@ model UserSession {
   tenantId         String
   userId           String
   sessionTokenHash String    @unique
+  refreshTokenHash String?   @unique
+  refreshTokenExpiresAt DateTime?
   browser          String?
   os               String?
   deviceType       String?
@@ -2612,10 +2618,11 @@ model TelephonyCallReceipt {
   @@map("telephony_call_receipts")
 }
 
-// Outbound click-to-call settings. tenantId is stored without a Tenant relation.
+// Dialpad settings. tenantId is stored without a Tenant relation.
 model TelephonySetting {
   id                     String   @id @default(cuid())
   tenantId               String   @unique
+  // Legacy REST click-to-call fields. Retained for existing databases; never used or exposed.
   clickToCallUrl         String   @default("https://bizcall.cxteletech.com/api/integration/click2call")
   authHeaderName         String   @default("X-API-KEY")
   useBearerPrefix        Boolean  @default(false)
@@ -2630,6 +2637,7 @@ model TelephonySetting {
   updatedById            String?
   dialpadUrl             String   @default("https://bizcall.cxteletech.com/embed/dialpad")
   dialpadMode            String   @default("DOCKED")
+  // Legacy selector for REST/message modes; the CRM now uses validated dialpad URLs only.
   callMethod             String   @default("SERVER_API")
   defaultDockState       String   @default("COLLAPSED")
   theme                  String   @default("CRM")
@@ -2638,7 +2646,7 @@ model TelephonySetting {
   callsPerMinute         Int      @default(10)
   maskNumbers            Boolean  @default(false)
   sendTenantIdInDial     Boolean  @default(true)
-  autoDialOnClick        Boolean  @default(true)
+  autoDialOnClick        Boolean  @default(false)
   blockDnc               Boolean  @default(false)
   dncNumbers             String   @default("")
   createdAt              DateTime @default(now())
@@ -2660,7 +2668,7 @@ model TelephonyAgentPermission {
   @@map("telephony_agent_permissions")
 }
 
-// One row per click-to-call attempt. No tokens and no full phone numbers.
+// Legacy REST click-to-call request log. Retained but unused; recent calls come from CallDetail.
 model TelephonyRequestLog {
   id            String   @id @default(cuid())
   tenantId      String

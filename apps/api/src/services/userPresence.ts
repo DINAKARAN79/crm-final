@@ -8,6 +8,7 @@ import { notifyTenantPresence } from './presenceEvents';
 export const DEFAULT_IDLE_TIMEOUT_SECONDS = 120;
 export const DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30;
 export const SESSION_RETENTION_DAYS = 90;
+export const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 export const MANAGED_USER_FIELDS = ['isLoggedIn', 'lastLoginAt', 'lastSeenAt', 'lastLogoutAt'] as const;
 
@@ -225,6 +226,8 @@ export async function openUserSession(input: {
   userId: string;
   tenantId: string;
   sessionSecret: string;
+  refreshTokenSecret?: string;
+  refreshTokenExpiresAt?: Date;
   req: Request;
   isImpersonation: boolean;
 }) {
@@ -236,6 +239,10 @@ export async function openUserSession(input: {
         tenantId: input.tenantId,
         userId: input.userId,
         sessionTokenHash: hashSessionSecret(input.sessionSecret),
+        refreshTokenHash: input.refreshTokenSecret ? hashSessionSecret(input.refreshTokenSecret) : null,
+        refreshTokenExpiresAt: input.refreshTokenSecret
+          ? input.refreshTokenExpiresAt || new Date(now.getTime() + REFRESH_TOKEN_TTL_MS)
+          : null,
         browser: client.browser,
         os: client.os,
         deviceType: client.deviceType,
