@@ -933,15 +933,15 @@ export function PlatformReporting({ section }: { section: Section }) {
       )}
 
       {section === "objects" && (
-        <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <section className="grid min-w-0 gap-3 md:grid-cols-2 xl:grid-cols-3">
           {registry.map((object) => (
-            <article key={object.name} className="rounded-xl border bg-white p-4">
+            <article key={object.name} className="min-w-0 rounded-xl border bg-white p-4">
               <div className="flex items-start justify-between gap-2">
-                <div><h2 className="font-semibold text-slate-900">{object.name}</h2><p className="text-xs text-slate-500">{object.name} · {object.scope === "tenant" ? "tenant-owned" : "platform-wide"}</p></div>
+                <div className="min-w-0"><h2 className="break-words font-semibold text-slate-900">{object.name}</h2><p className="break-words text-xs text-slate-500">{object.name} · {object.scope === "tenant" ? "tenant-owned" : "platform-wide"}</p></div>
                 <span className="rounded-full bg-sky-50 px-2 py-1 text-xs text-sky-800">{object.fields.length} fields</span>
               </div>
-              <div className="mt-3 flex flex-wrap gap-1">{object.fields.map((field) => <span key={field.name} title={`${field.name}: ${field.type}`} className="rounded bg-slate-100 px-2 py-1 text-[11px] text-slate-700">{field.name}</span>)}</div>
-              {!!object.relations?.length && <p className="mt-3 text-xs text-slate-500">Safe relationships: {object.relations.map((relation) => `${relation.name} → ${relation.target}`).join(", ")}</p>}
+              <div className="mt-3 flex flex-wrap gap-1">{object.fields.map((field) => <span key={field.name} title={`${field.name}: ${field.type}`} className="max-w-full break-all rounded bg-slate-100 px-2 py-1 text-[11px] text-slate-700">{field.name}</span>)}</div>
+              {!!object.relations?.length && <p className="mt-3 break-words text-xs text-slate-500">Safe relationships: {object.relations.map((relation) => `${relation.name} → ${relation.target}`).join(", ")}</p>}
             </article>
           ))}
           {!registry.length && !error && <p className="rounded-lg border bg-white p-5 text-sm text-slate-500">Loading the reportable object registry…</p>}

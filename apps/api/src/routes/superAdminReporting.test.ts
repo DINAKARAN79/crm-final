@@ -111,6 +111,21 @@ describe('Super Admin reporting API', () => {
     expect(metricUser.status).toBe(403);
   });
 
+  it('lists tenants and records the reporting audit entry', async () => {
+    const base = await createServer();
+    const response = await fetch(`${base}/tenants?page=1&pageSize=200`, { headers: adminHeaders });
+    const payload = await response.json() as { success: boolean; data: { items: Array<{ id: string }>; total: number } };
+
+    expect(response.status).toBe(200);
+    expect(payload).toMatchObject({
+      success: true,
+      data: { items: [{ id: 'tenant-1' }], total: 1 },
+    });
+    expect(prismaMock.platformReportExecutionAudit.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ operation: 'list-tenants', targetType: 'tenant' }),
+    }));
+  });
+
   it('uses the same registered metric query for each dashboard card and its record total', async () => {
     const base = await createServer();
     const cardsResponse = await fetch(`${base}/metrics`, { headers: adminHeaders });
