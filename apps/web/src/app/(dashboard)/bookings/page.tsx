@@ -16,6 +16,7 @@ import { BOOKING_STAGE_OPTIONS } from "@dct-crm/shared";
 import { type BookingRecord } from "@/components/crm/lead-bookings";
 import { PdfDocumentPreview, type PdfPreviewDocument } from "@/components/crm/pdf-document-preview";
 import { useToast } from "@/hooks/use-toast";
+import { formatDate } from "@/lib/date-format";
 
 type BookingRow = BookingRecord & { lead: NonNullable<BookingRecord["lead"]> };
 
@@ -207,7 +208,7 @@ export default function BookingDetailsPage() {
                         {row.status.replace(/_/g, " ")}
                       </span>
                     </TableCell>
-                    <TableCell className="whitespace-nowrap py-2.5">{new Date(row.createdAt).toLocaleDateString("en-IN")}</TableCell>
+                    <TableCell className="whitespace-nowrap py-2.5">{formatDate(row.createdAt)}</TableCell>
                     <TableCell className="py-2.5" onClick={(event) => event.stopPropagation()}>
                       <div className="flex justify-end gap-1.5 whitespace-nowrap">
                         {(isAdmin || isSuperAdmin) && (

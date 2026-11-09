@@ -17,6 +17,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { CurrencyInput } from "@/components/ui/currency-input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
@@ -34,6 +35,7 @@ import { ConfigurationPicker, FloorPicker, PropertyTypePicker, QuoteDrillSkeleto
 import { normalizeBlueLayoutImage, replaceSolidBlueBackground } from "@/lib/quotation-layout-background";
 import { QuotationLayoutDrawing, type QuotationLayoutShape, type QuotationLayoutUnit } from "@/components/crm/quotation-layout-drawing";
 import { useToast } from "@/hooks/use-toast";
+import { formatDate as formatTenantDate } from "@/lib/date-format";
 
 interface CompletedVisit {
   id: string;
@@ -45,6 +47,7 @@ interface CompletedVisit {
 
 interface QuotationLead {
   id: string;
+  leadNumber?: string | null;
   firstName?: string;
   lastName: string;
   company: string;
@@ -232,16 +235,16 @@ const PAYMENT_PLANS: PaymentPlan[] = [
   {
     name: "10% Booking + 90% Registration",
     installments: [
-      { milestone: "On confirmation", percentage: 10, dueMonths: 0 },
-      { milestone: "On registration", percentage: 90, dueMonths: 1 },
+      { milestone: "On confirmation", percentage: 10, dueDays: 0 },
+      { milestone: "On registration", percentage: 90, dueDays: 30 },
     ],
   },
   {
     name: "10% Booking + 40% Agreement + 50% Possession",
     installments: [
-      { milestone: "On confirmation", percentage: 10, dueMonths: 0 },
-      { milestone: "On agreement", percentage: 40, dueMonths: 1 },
-      { milestone: "On possession", percentage: 50, dueMonths: 6 },
+      { milestone: "On confirmation", percentage: 10, dueDays: 0 },
+      { milestone: "On agreement", percentage: 40, dueDays: 30 },
+      { milestone: "On possession", percentage: 50, dueDays: 180 },
     ],
   },
 ];
@@ -251,7 +254,7 @@ const formatCurrency = (amount: number) =>
   new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(amount);
 
 const formatDate = (value: string) =>
-  new Intl.DateTimeFormat("en-IN", { dateStyle: "medium" }).format(new Date(value));
+  formatTenantDate(value);
 
 const locationLine = (parts: Array<string | null | undefined>) => {
   const seen = new Set<string>();
@@ -333,7 +336,7 @@ export function LeadQuotations({
   const [plotArea, setPlotArea] = React.useState<number | null>(null);
   const [pricePerSqFt, setPricePerSqFt] = React.useState("");
   const [plcAmount, setPlcAmount] = React.useState("0");
-  const [discountAmount, setDiscountAmount] = React.useState("0");
+  const [discountPercent, setDiscountPercent] = React.useState("0");
   const [paymentPlanName, setPaymentPlanName] = React.useState(PAYMENT_PLANS[0].name);
   const [customPlanName, setCustomPlanName] = React.useState("Custom payment plan");
   const [customInstallments, setCustomInstallments] = React.useState<EditableInstallment[]>(defaultCustomInstallments);
@@ -359,7 +362,7 @@ export function LeadQuotations({
     if (!Number.isFinite(installment.percentage) || installment.percentage <= 0) errors.percentage = "Enter a percentage greater than 0.";
     else if (installment.percentage > 100) errors.percentage = "Percentage cannot exceed 100.";
     if (!Number.isInteger(installment.dueDays) || installment.dueDays < 0) errors.dueDays = "Enter a whole number of days, 0 or more.";
-    else if (installment.dueDays > 3650) errors.dueDays = "Due days cannot exceed 3,650.";
+    else if (installment.dueDays > 3650) errors.dueDays = "Due days cannot exceed 3650.";
     return errors;
   });
   const customPlanTotal = customInstallments.reduce(
@@ -390,8 +393,12 @@ export function LeadQuotations({
   const area = Number(selectedUnit?.area || 0);
   const basePrice = area * Number(pricePerSqFt || 0);
   const plc = Number(plcAmount || 0);
-  const discount = Number(discountAmount || 0);
-  const totalPrice = basePrice + plc - discount;
+  const discountPercentValue = Number(discountPercent || 0);
+  const subtotal = basePrice + plc;
+  const discount = Math.round((basePrice * discountPercentValue / 100) * 100) / 100;
+  const totalPrice = subtotal - discount;
+  const hasValidLeadEmail = typeof lead.email === "string" &&
+    /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(lead.email.trim());
   const customAmounts = quotationScheduleAmounts(
     totalPrice,
     customInstallments.map((installment) => (Number.isFinite(installment.percentage) ? installment.percentage : 0)),
@@ -884,7 +891,7 @@ export function LeadQuotations({
     setSelectedProjectId(completedVisits[0]?.projectId || lead.projectId || "");
     setSelectedUnitId("");
     setPlcAmount("0");
-    setDiscountAmount("0");
+    setDiscountPercent("0");
     setPaymentPlanName(PAYMENT_PLANS[0].name);
     setCustomPlanName("Custom payment plan");
     setCustomInstallments(defaultCustomInstallments());
@@ -895,6 +902,14 @@ export function LeadQuotations({
 
   const showPreview = (event: React.FormEvent) => {
     event.preventDefault();
+    if (!hasValidLeadEmail) {
+      toast({
+        title: "Customer email required",
+        description: "Add a valid email address to this lead before creating a quotation.",
+        variant: "destructive",
+      });
+      return;
+    }
     if (
       !selectedVisitId ||
       !selectedProjectId ||
@@ -904,6 +919,8 @@ export function LeadQuotations({
       Number(pricePerSqFt) <= 0 ||
       !Number.isFinite(plc) ||
       plc < 0 ||
+      !Number.isFinite(discountPercentValue) ||
+      discountPercentValue < 0 ||
       !Number.isFinite(discount) ||
       discount < 0 ||
       !Number.isFinite(totalPrice) ||
@@ -913,9 +930,9 @@ export function LeadQuotations({
       toast({
         title: "Complete the quotation details",
         description: paymentPlanValid
-          ? "Choose a completed visit, project and available unit, then enter valid pricing."
+          ? "Choose a completed visit, project and available unit, then enter valid pricing. The total cannot be negative."
           : customPlanTotalExact
-            ? "Complete the custom payment plan. Each installment needs a name, a percentage, and a due day."
+            ? "Complete the custom payment plan. Each installment needs a name, a percentage, and a due month."
             : customPlanTotalMessage,
         variant: "destructive",
       });
@@ -935,7 +952,7 @@ export function LeadQuotations({
         unitId: selectedUnitId,
         pricePerSqFt: Number(pricePerSqFt),
         plcAmount: plc,
-        discountAmount: discount,
+        discountPercent: discountPercentValue,
         paymentPlan: selectedPlan,
         terms: terms.trim() || undefined,
       });
@@ -944,8 +961,8 @@ export function LeadQuotations({
       setPreviewOpen(false);
       setSelectedUnitId("");
       toast({
-        title: "Quotation confirmed",
-        description: `${quotation.quotationNumber} was saved. The unit remains available until booking.`,
+        title: "Quotation saved",
+        description: `${quotation.quotationNumber} was saved, but not emailed because email delivery is not configured. Share its PDF manually; the unit remains available until booking.`,
       });
     } catch (error: any) {
       console.error("Failed to confirm quotation:", error);
@@ -1321,9 +1338,8 @@ export function LeadQuotations({
                   ))}
                   <div className="space-y-1.5 rounded-lg border bg-white p-3">
                     <Label htmlFor="booking-amount">Booking amount *</Label>
-                    <Input
+                    <CurrencyInput
                       id="booking-amount"
-                      type="number"
                       min="0"
                       max={bookingQuotation.totalPrice}
                       step="0.01"
@@ -1473,7 +1489,7 @@ export function LeadQuotations({
             <DialogHeader>
               <div className="mb-2 flex items-center gap-2">
                 <span className="rounded-full bg-white/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-indigo-100">Quote builder</span>
-                <span className="text-xs text-indigo-200">Lead {lead.id.slice(-6).toUpperCase()}</span>
+                <span className="text-xs text-indigo-200">{lead.leadNumber ? `Lead ${lead.leadNumber}` : "Lead"}</span>
               </div>
               <DialogTitle className="text-2xl font-semibold text-white">Create a quotation</DialogTitle>
               <DialogDescription className="max-w-2xl text-indigo-100">
@@ -1516,6 +1532,11 @@ export function LeadQuotations({
                   </div>
                 ))}
               </div>
+              {!hasValidLeadEmail && (
+                <p className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
+                  A valid email address is required. Add one to this lead before creating a quotation.
+                </p>
+              )}
             </section>
 
             <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -1780,20 +1801,20 @@ export function LeadQuotations({
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="quote-rate">Price / sq ft *</Label>
-                    <Input id="quote-rate" className="h-11" type="number" min="0.01" step="0.01" required value={pricePerSqFt} onChange={(event) => setPricePerSqFt(event.target.value)} />
+                    <CurrencyInput id="quote-rate" className="h-11" min="0.01" step="0.01" required value={pricePerSqFt} onChange={(event) => setPricePerSqFt(event.target.value)} />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="quote-plc">PLC / other charges</Label>
-                    <Input id="quote-plc" className="h-11" type="number" min="0" step="0.01" value={plcAmount} onChange={(event) => setPlcAmount(event.target.value)} />
+                    <CurrencyInput id="quote-plc" className="h-11" min="0" step="0.01" value={plcAmount} onChange={(event) => setPlcAmount(event.target.value)} />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="quote-discount">Discount</Label>
-                    <Input id="quote-discount" className="h-11" type="number" min="0" step="0.01" value={discountAmount} onChange={(event) => setDiscountAmount(event.target.value)} />
+                    <Label htmlFor="quote-discount">Discount (%)</Label>
+                    <Input id="quote-discount" className="h-11" type="number" min="0" step="0.01" required value={discountPercent} onChange={(event) => setDiscountPercent(event.target.value)} />
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-slate-950 px-4 py-3 text-white">
                   <div>
-                    <p className="text-xs text-slate-300">Base price {formatCurrency(basePrice)} · PLC {formatCurrency(plc)} · Discount {formatCurrency(discount)}</p>
+                    <p className="text-xs text-slate-300">Base price {formatCurrency(basePrice)} · PLC {formatCurrency(plc)} · Discount {discountPercentValue}% ({formatCurrency(discount)})</p>
                     <p className="mt-1 text-xs text-slate-300">Calculated quotation value</p>
                   </div>
                   <p className="text-2xl font-semibold tracking-tight">{formatCurrency(totalPrice)}</p>
@@ -1926,11 +1947,12 @@ export function LeadQuotations({
                             {errors?.percentage && <p className="text-xs text-rose-700">{errors.percentage}</p>}
                           </div>
                           <div className="space-y-1.5">
-                            <Label htmlFor={`${installment.id}-days`} className="text-xs">Due after (days)</Label>
+                            <Label htmlFor={`${installment.id}-days`} className="text-xs">Due after (days) *</Label>
                             <Input
                               id={`${installment.id}-days`}
                               type="number"
                               min="0"
+                              max="3650"
                               step="1"
                               aria-invalid={Boolean(errors?.dueDays)}
                               value={Number.isFinite(installment.dueDays) ? installment.dueDays : ""}
@@ -2013,8 +2035,9 @@ export function LeadQuotations({
             <div className="space-y-2 border-y py-4 text-sm">
               <div className="flex justify-between"><span>Base price</span><span>{formatCurrency(basePrice)}</span></div>
               <div className="flex justify-between"><span>PLC / other charges</span><span>{formatCurrency(plc)}</span></div>
-              <div className="flex justify-between"><span>Discount</span><span>-{formatCurrency(discount)}</span></div>
+              <div className="flex justify-between"><span>Discount ({discountPercentValue}%)</span><span>-{formatCurrency(discount)}</span></div>
               <div className="flex justify-between border-t pt-2 text-base font-semibold"><span>Total quotation value</span><span>{formatCurrency(totalPrice)}</span></div>
+              <p className="pt-2 text-xs text-muted-foreground">Taxes are not configured and are not included in this quotation.</p>
             </div>
             <div>
               <h3 className="font-semibold">Payment plan: {selectedPlan.name}</h3>

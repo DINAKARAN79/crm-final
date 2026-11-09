@@ -282,7 +282,13 @@ export class RoundRobinAssignmentService {
     return state.member;
   }
 
-  static async getNextEligibleMember(queueId: string, tenantId: string, tx: RRClient = prisma, userType: RRMemberUserType = 'Sales') {
+  static async getNextEligibleMember(
+    queueId: string,
+    tenantId: string,
+    tx: RRClient = prisma,
+    userType: RRMemberUserType = 'Sales',
+    profileNames?: string[],
+  ) {
     const queue = await tx.rRQueue.findFirst({
       where: { id: queueId, tenantId },
       include: {
@@ -310,7 +316,9 @@ export class RoundRobinAssignmentService {
 
     const maxAttempts = Math.max(2, members.length * 2);
     const skipped: string[] = [];
-    const eligibleProfiles = getRoundRobinProfileNames(userType);
+    const eligibleProfiles = (profileNames === undefined ? getRoundRobinProfileNames(userType) : profileNames)
+      .map((name) => name.trim().toLocaleLowerCase())
+      .filter(Boolean);
     const startIndex = members.findIndex((member) => member.sequenceId > queue.previousId) >= 0
       ? members.findIndex((member) => member.sequenceId > queue.previousId)
       : 0;
@@ -330,7 +338,7 @@ export class RoundRobinAssignmentService {
         skipped.push(`${candidate.name}: user inactive`);
         continue;
       }
-      if (!eligibleProfiles.includes(candidate.user.profile?.name || '')) {
+      if (!eligibleProfiles.includes((candidate.user.profile?.name || '').trim().toLocaleLowerCase())) {
         skipped.push(`${candidate.name}: user profile is not eligible for ${userType}`);
         continue;
       }
@@ -582,6 +590,7 @@ export async function selectNextProjectRRMemberInTransaction(
     projectId: string | null;
     userType: RRMemberUserType;
     criteria?: Parameters<typeof findProjectRRQueue>[4];
+    profileNames?: string[];
   },
 ) {
   if (!params.projectId) throw new Error('RR_PROJECT_REQUIRED');
@@ -601,6 +610,7 @@ export async function selectNextProjectRRMemberInTransaction(
     params.tenantId,
     tx,
     params.userType,
+    params.profileNames,
   );
   if (!next.member) throw new Error(`NO_ELIGIBLE_RR_MEMBER:${params.userType}`);
   const assignedAt = new Date();
@@ -625,6 +635,7 @@ export async function assignLeadToProjectRoundRobinInTransaction(
     actorId: string;
     reason: string;
     leadStatus?: string;
+    profileNames?: string[];
   },
 ) {
   if (!params.projectId) throw new Error('RR_PROJECT_REQUIRED');
@@ -644,6 +655,7 @@ export async function assignLeadToProjectRoundRobinInTransaction(
   const { queue, member } = await selectNextProjectRRMemberInTransaction(tx, {
     ...params,
     criteria,
+    profileNames: params.profileNames,
   });
   const ownerName = `${member.user.firstName} ${member.user.lastName}`.trim() || member.user.email;
   const nextStatus = params.leadStatus || lead.status;

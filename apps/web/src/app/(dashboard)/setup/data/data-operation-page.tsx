@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, Download, FileSpreadsheet, Upload, XCircle } from "lucide-react";
 import { useAuth } from "@/contexts/auth-context";
 import { dataAdministrationApi, objectDefinitionApi } from "@/lib/api";
@@ -8,42 +8,119 @@ import { buildImportRowOutcomes, summarizeImportResult, type ImportFeedback } fr
 import {
   buildMappedImportRows,
   getCsvColumns,
-  parseCsvPreview,
+  parseCsvPreviewAsync,
   serializeCsv,
   suggestCsvFieldMappings,
 } from "@/lib/data-import-csv";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
+import { filterImportRows, getImportAssignmentLabel, getPageCount, getPageNumbers, IMPORT_PAGE_SIZE, normalizeImportStatus, paginateRows, serializeDownloadCsv } from "@/lib/data-import-pagination";
 
 const MAX_IMPORT_RECORDS = 100_000;
-const PREVIEW_ROW_LIMIT = 100;
+const MAX_IMPORT_BYTES = 25 * 1024 * 1024;
 
 export default function DataOperationPage({ mode }: { mode: "import" | "update" | "export" }) {
-  const { hasEffectivePermission, hasFullAccess } = useAuth();
+  const { hasEffectivePermission, hasFullAccess, isAdmin, isSuperAdmin } = useAuth();
   const { toast } = useToast();
   const permission = mode === "import" ? "DATA_IMPORT" : mode === "update" ? "DATA_UPDATE" : "DATA_EXPORT";
   const allowed = hasFullAccess || hasEffectivePermission(permission);
   const isUpdateMode = mode === "update";
   const [objects, setObjects] = useState<{ name: string; label: string; isActive?: boolean }[]>([]);
-  const [fields, setFields] = useState<{ name: string; label: string; required?: boolean }[]>([]);
+  const [fields, setFields] = useState<{ name: string; label: string; required?: boolean; fieldType?: string }[]>([]);
   const [objectName, setObjectName] = useState("");
   const [selectedFields, setSelectedFields] = useState<string[]>([]);
   const [csv, setCsv] = useState("");
   const [parsedCsv, setParsedCsv] = useState<{ rows: string[][]; error: string }>({ rows: [], error: "" });
   const [hasHeaderRow, setHasHeaderRow] = useState(true);
+  const hasHeaderRowRef = useRef(true);
+  const parseRequestRef = useRef(0);
   const [columnMappings, setColumnMappings] = useState<Record<number, string>>({});
   const [csvError, setCsvError] = useState("");
   const [importFeedback, setImportFeedback] = useState<ImportFeedback | null>(null);
-  const [importRows, setImportRows] = useState<{ index: number; status: "success" | "failed"; error?: string; values: string[]; sourceRowNumber: number }[]>([]);
+  const [importJobSummary, setImportJobSummary] = useState<{
+    id: string;
+    status: string;
+    totalRows: number;
+    createdCount: number;
+    linkedCount: number;
+    failedCount: number;
+  } | null>(null);
+  const [bookedBucketImportSummary, setBookedBucketImportSummary] = useState<{
+    leadCount: number;
+    ownerCount: number;
+    warning: boolean;
+    warningMessage: string | null;
+  } | null>(null);
+  const [importRows, setImportRows] = useState<{
+    index: number;
+    status: "success" | "failed";
+    error?: string;
+    values: string[];
+    sourceRowNumber: number;
+    leadNumber?: string;
+    projectName?: string;
+    leadStatus?: string;
+    assignedOwner?: string;
+    assignmentGroup?: string;
+  }[]>([]);
   const [resultHeaders, setResultHeaders] = useState<string[]>([]);
   const [resultTab, setResultTab] = useState<"success" | "failed">("success");
   const [resultPage, setResultPage] = useState(0);
+  const [resultPageInput, setResultPageInput] = useState("1");
+  const [resultFilter, setResultFilter] = useState("");
+  const [previewPage, setPreviewPage] = useState(0);
+  const [previewPageInput, setPreviewPageInput] = useState("1");
+  const [previewFilter, setPreviewFilter] = useState("");
+  const [parsingCsv, setParsingCsv] = useState(false);
+  const [leadImportProfiles, setLeadImportProfiles] = useState<Array<{ status: string; userType: string; profileNames: string[] }>>([]);
+  const [bookedBucketProfileStatus, setBookedBucketProfileStatus] = useState<{ isActive: boolean; ownerCount: number } | null>(null);
+  const [savingLeadImportProfiles, setSavingLeadImportProfiles] = useState(false);
   const [loading, setLoading] = useState(false);
   const [metadataLoading, setMetadataLoading] = useState(true);
   const csvColumns = useMemo(() => getCsvColumns(parsedCsv.rows, hasHeaderRow), [hasHeaderRow, parsedCsv.rows]);
   const csvDataRows = hasHeaderRow ? parsedCsv.rows.slice(1) : parsedCsv.rows;
   const mappedFields = [...new Set(Object.values(columnMappings).filter(Boolean))];
+  const parseCsvInput = (content: string) => {
+    const requestId = ++parseRequestRef.current;
+    setCsv(content);
+    setCsvError("");
+    setParsingCsv(true);
+    void parseCsvPreviewAsync(content, () => requestId === parseRequestRef.current)
+      .then((parsed) => {
+        if (!parsed || requestId !== parseRequestRef.current) return;
+        setParsedCsv(parsed);
+        setPreviewPage(0);
+        const rowCount = parsed.rows.length - (hasHeaderRowRef.current ? 1 : 0);
+        setCsvError(parsed.error || (rowCount < 1 ? "CSV must contain at least one data row." : rowCount > MAX_IMPORT_RECORDS ? `Imports support up to ${MAX_IMPORT_RECORDS.toLocaleString()} records at a time.` : ""));
+      })
+      .catch(() => {
+        if (requestId === parseRequestRef.current) setCsvError("Could not parse this CSV data. Check its formatting and try again.");
+      })
+      .finally(() => {
+        if (requestId === parseRequestRef.current) setParsingCsv(false);
+      });
+  };
+  const mappedColumnIndex = (field: string) => Object.entries(columnMappings)
+    .find(([, mappedField]) => mappedField === field)?.[0];
+  const projectColumnIndex = Object.entries(columnMappings)
+    .find(([, field]) => ["project", "projectId", "projectName", "allocatedProject", "allocatedProjectId", "sfAllocatedProject", "sfAllocatedProjectC", "projectAssigned"].includes(field))?.[0];
+  const statusColumnIndex = mappedColumnIndex("status");
+  const ownerColumnIndex = mappedColumnIndex("ownerId");
+  const getRoutingPreview = (row: string[]) => {
+    const statusValue = statusColumnIndex === undefined ? "" : row[Number(statusColumnIndex)] || "";
+    const ownerValue = ownerColumnIndex === undefined ? "" : row[Number(ownerColumnIndex)] || "";
+    const projectValue = projectColumnIndex === undefined ? "" : row[Number(projectColumnIndex)] || "";
+    const status = normalizeImportStatus(statusValue);
+    const routingGroup = getImportAssignmentLabel(status, projectValue, ownerValue);
+    const configuredProfiles = leadImportProfiles.find((profile) => profile.status === status)?.profileNames || [];
+    return {
+      status,
+      assignment: configuredProfiles.length && routingGroup.includes("round robin")
+        ? `${routingGroup} · ${configuredProfiles.join(", ")}`
+        : routingGroup,
+    };
+  };
 
   const applyImportRows = (
     result: Parameters<typeof summarizeImportResult>[1],
@@ -60,6 +137,7 @@ export default function DataOperationPage({ mode }: { mode: "import" | "update" 
     })));
     setResultTab(outcomes.some((outcome) => outcome.status === "failed") ? "failed" : "success");
     setResultPage(0);
+    setResultFilter("");
   };
 
   useEffect(() => {
@@ -79,6 +157,22 @@ export default function DataOperationPage({ mode }: { mode: "import" | "update" 
     }
     objectDefinitionApi.fields(objectName).then((response) => {
       const available = (response.data.data || []).filter((field: { name: string; label: string; required?: boolean; isActive?: boolean; isSystemField?: boolean }) => field.isActive !== false && field.isSystemField !== true);
+      if (objectName.trim().toLowerCase() === "lead") {
+        if (!available.some((field: { name: string }) => field.name === "status")) {
+          available.push({ name: "status", label: "Lead Status", fieldType: "text", required: false });
+        }
+        if (!available.some((field: { name: string }) => field.name === "ownerId")) {
+          available.push({ name: "ownerId", label: "Owner (user ID or email)", fieldType: "text", required: false });
+        }
+      }
+      if (objectName.trim().toLowerCase() === "lead" && !available.some((field: { name: string }) => field.name === "originalSubmissionId")) {
+        available.push({
+          name: "originalSubmissionId",
+          label: "Original Submission ID (Enquiry source-system key)",
+          fieldType: "text",
+          required: false,
+        });
+      }
       setFields(available);
       setSelectedFields(available.filter((field: { name: string; label: string; required?: boolean; isActive?: boolean; isSystemField?: boolean }) => field.required).map((field: { name: string }) => field.name));
     }).catch((error: any) => {
@@ -91,6 +185,23 @@ export default function DataOperationPage({ mode }: { mode: "import" | "update" 
   useEffect(() => {
     setColumnMappings(suggestCsvFieldMappings(csvColumns, fields));
   }, [csvColumns, fields]);
+
+  useEffect(() => setResultPageInput(String(resultPage + 1)), [resultPage]);
+  useEffect(() => setPreviewPageInput(String(previewPage + 1)), [previewPage]);
+
+  useEffect(() => {
+    if (mode !== "import" || objectName.trim().toLowerCase() !== "lead" || (!isAdmin && !isSuperAdmin)) {
+      setLeadImportProfiles([]);
+      setBookedBucketProfileStatus(null);
+      return;
+    }
+    dataAdministrationApi.leadImportProfiles().then((response) => {
+      setLeadImportProfiles(response.data.data?.profiles || []);
+      setBookedBucketProfileStatus(response.data.data?.bookedBucket || { isActive: false, ownerCount: 0 });
+    }).catch((error: any) => {
+      toast({ title: "Unable to load assignment profiles", description: error?.response?.data?.error || "Try again.", variant: "destructive" as any });
+    });
+  }, [isAdmin, isSuperAdmin, mode, objectName, toast]);
 
   const runImport = async () => {
     if (csvError) {
@@ -132,12 +243,16 @@ export default function DataOperationPage({ mode }: { mode: "import" | "update" 
     try {
       setLoading(true);
       setImportFeedback(null);
+      setImportJobSummary(null);
+      setBookedBucketImportSummary(null);
       setImportRows([]);
       const response = isUpdateMode
         ? await dataAdministrationApi.update(objectName, { fields: mappedFields, csv: serializeCsv(mappedRows) })
         : await dataAdministrationApi.import(objectName, mappedFields, serializeCsv(mappedRows));
-      const outcome = summarizeImportResult(objectName, response.data);
+      const outcome = summarizeImportResult(objectName, response.data, isUpdateMode ? "update" : "import");
       setImportFeedback(outcome);
+      setImportJobSummary(response.data.data?.job || null);
+      setBookedBucketImportSummary(response.data.data?.assignmentSummary?.bookedBucket || null);
       applyImportRows(response.data, submittedRows, submittedHeaders, submittedHasHeaderRow);
       toast({
         title: outcome.title,
@@ -147,6 +262,8 @@ export default function DataOperationPage({ mode }: { mode: "import" | "update" 
     } catch (error: any) {
       const description = error?.response?.data?.error || error.message || "The import request failed.";
       const responseData = error?.response?.data || { success: false, error: description };
+      setImportJobSummary(responseData.data?.job || null);
+      setBookedBucketImportSummary(responseData.data?.assignmentSummary?.bookedBucket || null);
       const outcome: ImportFeedback = { kind: "error", title: "Import failed", description };
       setImportFeedback(outcome);
       applyImportRows(responseData, submittedRows, submittedHeaders, submittedHasHeaderRow);
@@ -157,8 +274,18 @@ export default function DataOperationPage({ mode }: { mode: "import" | "update" 
   };
 
   const requiredFields = fields.filter((field) => field.required);
-  const activeSelectedFields = mode === "import" ? mappedFields : selectedFields;
+  const activeSelectedFields = mappedFields;
   const missingRequiredFields = requiredFields.filter((field) => !activeSelectedFields.includes(field.name));
+  if (isUpdateMode && objectName.trim().toLowerCase() === "lead") {
+    for (const [name, label] of [
+      ["originalSubmissionId", "Original Submission ID (Enquiry source-system key)"],
+      ["source", "Lead Source"],
+    ]) {
+      if (!activeSelectedFields.includes(name)) {
+        missingRequiredFields.push({ name, label, required: true });
+      }
+    }
+  }
   const missingRequiredLabels = missingRequiredFields.map((field) => `${field.label} (${field.name})`);
 
   const runExport = async () => {
@@ -180,6 +307,21 @@ export default function DataOperationPage({ mode }: { mode: "import" | "update" 
     }
   };
 
+  const saveLeadImportProfiles = async () => {
+    try {
+      setSavingLeadImportProfiles(true);
+      const editable = leadImportProfiles
+        .filter((profile) => profile.userType !== "ADMIN_FALLBACK" && profile.userType !== "BOOKED_BUCKET")
+        .map((profile) => ({ status: profile.status, profileNames: profile.profileNames }));
+      await dataAdministrationApi.saveLeadImportProfiles(editable);
+      toast({ title: "Assignment profiles saved", description: "Lead import status profiles were updated for this tenant." });
+    } catch (error: any) {
+      toast({ title: "Unable to save assignment profiles", description: error?.response?.data?.error || "Try again.", variant: "destructive" as any });
+    } finally {
+      setSavingLeadImportProfiles(false);
+    }
+  };
+
   if (!allowed) {
     return <div className="rounded-lg border p-6"><h2 className="font-medium">Access required</h2><p className="mt-2 text-sm text-muted-foreground">Ask an administrator to assign the {permission} permission through a Permission Set.</p></div>;
   }
@@ -188,10 +330,21 @@ export default function DataOperationPage({ mode }: { mode: "import" | "update" 
     const previewHeaders = csvColumns;
     const previewRows = csvDataRows;
     const mappedHeaders = mappedFields.length;
-    const visibleResultRows = importRows.filter((row) => row.status === resultTab);
-    const resultPageCount = Math.ceil(visibleResultRows.length / PREVIEW_ROW_LIMIT);
-    const pagedResultRows = visibleResultRows.slice(resultPage * PREVIEW_ROW_LIMIT, (resultPage + 1) * PREVIEW_ROW_LIMIT);
-    const importDisabled = loading || metadataLoading || !objectName || !csv || !mappedFields.length || missingRequiredFields.length > 0 || Boolean(csvError);
+    const visibleResultRows = filterImportRows(
+      importRows.filter((row) => row.status === resultTab),
+      resultFilter,
+      (row) => [row.sourceRowNumber, row.leadNumber, row.projectName, row.leadStatus, row.assignedOwner, row.assignmentGroup, row.error, ...row.values],
+    );
+    const resultPageCount = getPageCount(visibleResultRows.length);
+    const pagedResultRows = paginateRows(visibleResultRows, resultPage);
+    const filteredPreviewRows = filterImportRows(
+      csvDataRows.map((row, index) => ({ row, index })),
+      previewFilter,
+      (item) => [...item.row, ...Object.values(getRoutingPreview(item.row))],
+    );
+    const previewPageCount = getPageCount(filteredPreviewRows.length);
+    const pagedPreviewRows = paginateRows(filteredPreviewRows, previewPage);
+    const importDisabled = loading || parsingCsv || metadataLoading || !objectName || !csv || !mappedFields.length || missingRequiredFields.length > 0 || Boolean(csvError);
 
     return <div className="-mx-4 -mt-4 min-h-[calc(100vh-3.5rem)] bg-[#eaf6ff] text-slate-800">
       <div className="flex min-h-12 items-center justify-between bg-[#07356c] px-5 py-2 text-white">
@@ -199,12 +352,29 @@ export default function DataOperationPage({ mode }: { mode: "import" | "update" 
           <span className="grid h-7 w-7 place-items-center rounded bg-white/15"><FileSpreadsheet className="h-4 w-4" /></span>
           <div className="text-sm font-semibold tracking-wide">{isUpdateMode ? "Data Update" : "Data Import"}</div>
         </div>
+        {bookedBucketProfileStatus && (
+          <p className={`mb-3 flex items-start gap-2 rounded-md px-3 py-2 text-xs ${
+            !bookedBucketProfileStatus.isActive || bookedBucketProfileStatus.ownerCount === 0
+              ? "bg-amber-50 text-amber-900"
+              : "bg-emerald-50 text-emerald-800"
+          }`}>
+            {(!bookedBucketProfileStatus.isActive || bookedBucketProfileStatus.ownerCount === 0) && <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
+            <span>
+              Booked Bucket · {bookedBucketProfileStatus.ownerCount} active owner{bookedBucketProfileStatus.ownerCount === 1 ? "" : "s"}
+              {!bookedBucketProfileStatus.isActive
+                ? " · Inactive; imported Booked leads will not move until activated."
+                : bookedBucketProfileStatus.ownerCount === 0
+                  ? " · Admin fallback will be used."
+                  : ""}
+            </span>
+          </p>
+        )}
         <span className="hidden text-xs text-blue-100 sm:block">{isUpdateMode ? "Review and apply bulk updates to existing CRM records" : "Import CSV records into your CRM"}</span>
       </div>
 
       <div className="space-y-3 p-3 sm:p-4">
         {isUpdateMode && <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-          Bulk updates are preview-first and must match the same validation rules as the normal create/update APIs. Lead status is excluded from this tool.
+          Lead updates require an explicitly mapped Enquiry Original Submission ID and configured Lead Source. Blank cells preserve existing values; contact details are never used as match keys.
         </div>}
         {importFeedback && <div role="status" aria-live="polite" className={`flex items-start gap-3 rounded-xl border px-4 py-3 text-sm ${
           importFeedback.kind === "success" ? "border-emerald-200 bg-emerald-50 text-emerald-900"
@@ -217,12 +387,48 @@ export default function DataOperationPage({ mode }: { mode: "import" | "update" 
           <div className="min-w-0">
             <p className="font-semibold">{importFeedback.title}</p>
             <p className="mt-0.5 text-xs">{importFeedback.description}</p>
+            {importJobSummary && <p className="mt-1 text-[11px]">Job {importJobSummary.id} · {importJobSummary.status} · {importJobSummary.createdCount} created · {importJobSummary.failedCount} failed</p>}
+            {bookedBucketImportSummary && bookedBucketImportSummary.leadCount > 0 && (
+              <p className={`mt-1 flex items-start gap-1 text-[11px] ${bookedBucketImportSummary.warning ? "font-medium text-amber-800" : ""}`}>
+                {bookedBucketImportSummary.warning && <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
+                <span>
+                  Booked Bucket · {bookedBucketImportSummary.leadCount} imported lead{bookedBucketImportSummary.leadCount === 1 ? "" : "s"} · {bookedBucketImportSummary.ownerCount} active owner{bookedBucketImportSummary.ownerCount === 1 ? "" : "s"}
+                  {bookedBucketImportSummary.warningMessage ? ` · ${bookedBucketImportSummary.warningMessage}` : ""}
+                </span>
+              </p>
+            )}
           </div>
         </div>}
         {importFeedback && <section aria-label="Import row results" className="overflow-hidden rounded-2xl bg-white shadow-sm">
           <div className="border-b border-slate-200 px-4 py-3">
             <h2 className="text-sm font-semibold text-slate-700">Import Results</h2>
-            <p className="mt-0.5 text-[11px] text-slate-500">Review each imported row and the reason any row failed.</p>
+            <p className="mt-0.5 text-[11px] text-slate-500">Review each imported row and the reason any row failed. Showing up to {IMPORT_PAGE_SIZE} rows per page.</p>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <Input aria-label="Filter import results" value={resultFilter} onChange={(event) => { setResultFilter(event.target.value); setResultPage(0); }} placeholder="Filter rows" className="h-8 max-w-xs text-xs" />
+              <Button type="button" variant="outline" size="sm" onClick={() => {
+                const rows = [
+                  ["CSV row", ...resultHeaders, "Lead #", "Project", "Saved status", "Assigned owner", "Assignment group", "Outcome", "Failure reason"],
+                  ...visibleResultRows.map((row) => [
+                    String(row.sourceRowNumber),
+                    ...resultHeaders.map((_, index) => row.values[index] || ""),
+                    row.leadNumber || "",
+                    row.projectName || "",
+                    row.leadStatus || getRoutingPreview(row.values).status,
+                    row.assignedOwner || "",
+                    row.assignmentGroup || getRoutingPreview(row.values).assignment,
+                    row.status,
+                    row.error || "",
+                  ]),
+                ];
+                const blob = new Blob([serializeDownloadCsv(rows)], { type: "text/csv;charset=utf-8" });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement("a");
+                link.href = url;
+                link.download = `${objectName || "import"}-${resultTab}-results.csv`;
+                link.click();
+                URL.revokeObjectURL(url);
+              }}><Download className="mr-1 h-3.5 w-3.5" />Download {resultTab} CSV</Button>
+            </div>
             <div role="tablist" aria-label="Import result status" className="mt-3 flex gap-2">
               {(["success", "failed"] as const).map((status) => {
                 const count = importRows.filter((row) => row.status === status).length;
@@ -231,7 +437,7 @@ export default function DataOperationPage({ mode }: { mode: "import" | "update" 
                   type="button"
                   role="tab"
                   aria-selected={resultTab === status}
-                  onClick={() => { setResultTab(status); setResultPage(0); }}
+                  onClick={() => { setResultTab(status); setResultPage(0); setResultFilter(""); }}
                   className={`rounded-full px-3 py-1.5 text-xs font-medium ${
                     resultTab === status
                       ? status === "success" ? "bg-emerald-100 text-emerald-800" : "bg-rose-100 text-rose-800"
@@ -246,12 +452,22 @@ export default function DataOperationPage({ mode }: { mode: "import" | "update" 
               <thead className="sticky top-0 bg-slate-50 text-slate-600"><tr>
                 <th className="border-b border-r border-slate-200 px-3 py-2 font-semibold">CSV row</th>
                 {resultHeaders.map((header, index) => <th key={`${header}-${index}`} className="border-b border-r border-slate-200 px-3 py-2 font-semibold">{header || `Column ${index + 1}`}</th>)}
+                <th className="border-b border-r border-slate-200 px-3 py-2 font-semibold">CRM Lead #</th>
+                <th className="border-b border-r border-slate-200 px-3 py-2 font-semibold">Project</th>
+                <th className="border-b border-r border-slate-200 px-3 py-2 font-semibold">Saved status</th>
+                <th className="border-b border-r border-slate-200 px-3 py-2 font-semibold">Assigned owner</th>
+                <th className="border-b border-r border-slate-200 px-3 py-2 font-semibold">Assignment group</th>
                 <th className="border-b border-r border-slate-200 px-3 py-2 font-semibold">Status</th>
                 {resultTab === "failed" && <th className="border-b border-slate-200 px-3 py-2 font-semibold">Failure reason</th>}
               </tr></thead>
               <tbody>{pagedResultRows.map((row) => <tr key={row.index} className="even:bg-slate-50/70">
                 <td className="border-b border-r border-slate-100 px-3 py-2 text-slate-600">{row.sourceRowNumber}</td>
                 {resultHeaders.map((header, columnIndex) => <td key={`${header}-${columnIndex}`} className="max-w-64 truncate border-b border-r border-slate-100 px-3 py-2 text-slate-600">{row.values[columnIndex] || <span className="text-slate-300">—</span>}</td>)}
+                <td className="border-b border-r border-slate-100 px-3 py-2 text-slate-600">{row.leadNumber || "—"}</td>
+                <td className="border-b border-r border-slate-100 px-3 py-2 text-slate-600">{row.projectName || "—"}</td>
+                <td className="border-b border-r border-slate-100 px-3 py-2 text-slate-600">{row.leadStatus || getRoutingPreview(row.values).status}</td>
+                <td className="border-b border-r border-slate-100 px-3 py-2 text-slate-600">{row.assignedOwner || "—"}</td>
+                <td className="border-b border-r border-slate-100 px-3 py-2 text-slate-600">{row.assignmentGroup || getRoutingPreview(row.values).assignment}</td>
                 <td className="border-b border-r border-slate-100 px-3 py-2">
                   <span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${row.status === "success" ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}`}>
                     {row.status === "success" ? "Successful" : "Failed"}
@@ -261,11 +477,20 @@ export default function DataOperationPage({ mode }: { mode: "import" | "update" 
               </tr>)}</tbody>
             </table>
           </div> : <p className="px-4 py-8 text-center text-xs text-slate-500">{resultTab === "success" ? "No rows were imported successfully." : "No rows failed."}</p>}
-          {resultPageCount > 1 && <div className="flex items-center justify-between border-t border-slate-200 px-4 py-2 text-xs text-slate-500">
-            <span>Showing {resultPage * PREVIEW_ROW_LIMIT + 1}–{Math.min((resultPage + 1) * PREVIEW_ROW_LIMIT, visibleResultRows.length)} of {visibleResultRows.length} rows</span>
-            <div className="flex gap-2">
+          {visibleResultRows.length > 0 && <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 px-4 py-2 text-xs text-slate-500">
+            <span>Showing {resultPage * IMPORT_PAGE_SIZE + 1}–{Math.min((resultPage + 1) * IMPORT_PAGE_SIZE, visibleResultRows.length)} of {visibleResultRows.length} rows</span>
+            <div className="flex flex-wrap items-center gap-1">
+              <button type="button" disabled={resultPage === 0} onClick={() => setResultPage(0)} className="rounded border px-2 py-1 disabled:opacity-40">First</button>
               <button type="button" disabled={resultPage === 0} onClick={() => setResultPage((page) => page - 1)} className="rounded border px-2 py-1 disabled:opacity-40">Previous</button>
+              {getPageNumbers(resultPage, resultPageCount).map((page) => <button key={page} type="button" aria-current={page === resultPage ? "page" : undefined} onClick={() => setResultPage(page)} className={`rounded border px-2 py-1 ${page === resultPage ? "border-blue-600 bg-blue-50 text-blue-700" : ""}`}>{page + 1}</button>)}
+              <label className="flex items-center gap-1">Page <input aria-label="Go to results page" type="number" min={1} max={resultPageCount} value={resultPageInput} onChange={(event) => setResultPageInput(event.target.value)} onBlur={() => {
+                const next = Number(resultPageInput);
+                setResultPage(next >= 1 && next <= resultPageCount ? next - 1 : resultPage);
+              }} onKeyDown={(event) => {
+                if (event.key === "Enter") event.currentTarget.blur();
+              }} className="h-7 w-14 rounded border px-1 text-center" /> of {resultPageCount}</label>
               <button type="button" disabled={resultPage + 1 >= resultPageCount} onClick={() => setResultPage((page) => page + 1)} className="rounded border px-2 py-1 disabled:opacity-40">Next</button>
+              <button type="button" disabled={resultPage + 1 >= resultPageCount} onClick={() => setResultPage(resultPageCount - 1)} className="rounded border px-2 py-1 disabled:opacity-40">Last</button>
             </div>
           </div>}
         </section>}
@@ -289,13 +514,11 @@ export default function DataOperationPage({ mode }: { mode: "import" | "update" 
                   const file = event.target.files?.[0];
                   event.target.value = "";
                   if (!file) return;
-                  file.text().then((content) => {
-                    const parsed = parseCsvPreview(content);
-                    setCsv(content);
-                    setParsedCsv(parsed);
-                    const rowCount = parsed.rows.length - (hasHeaderRow ? 1 : 0);
-                    setCsvError(parsed.error || (rowCount < 1 ? "CSV must contain at least one data row." : rowCount > MAX_IMPORT_RECORDS ? `Imports support up to ${MAX_IMPORT_RECORDS.toLocaleString()} records at a time.` : ""));
-                  }).catch(() => setCsvError("Could not read this CSV file. Please choose another file."));
+                  if (file.size > MAX_IMPORT_BYTES) {
+                    setCsvError("CSV files are limited to 25 MB.");
+                    return;
+                  }
+                  file.text().then(parseCsvInput).catch(() => setCsvError("Could not read this CSV file. Please choose another file."));
                 }} />
               </div>
             </div>
@@ -306,6 +529,8 @@ export default function DataOperationPage({ mode }: { mode: "import" | "update" 
               <input type="checkbox" checked={hasHeaderRow} onChange={(event) => {
                 const includesHeaders = event.target.checked;
                 setHasHeaderRow(includesHeaders);
+                hasHeaderRowRef.current = includesHeaders;
+                setPreviewPage(0);
                 const rowCount = parsedCsv.rows.length - (includesHeaders ? 1 : 0);
                 setCsvError(parsedCsv.error || (csv && rowCount < 1 ? "CSV must contain at least one data row." : rowCount > MAX_IMPORT_RECORDS ? `Imports support up to ${MAX_IMPORT_RECORDS.toLocaleString()} records at a time.` : ""));
               }} className="h-4 w-4 rounded border-slate-300 accent-blue-600" />
@@ -314,19 +539,45 @@ export default function DataOperationPage({ mode }: { mode: "import" | "update" 
             </div>
               <textarea id="data-csv-paste" value={csv} onChange={(event) => {
                 const value = event.target.value;
-                const parsed = parseCsvPreview(value);
-                setCsv(value);
-                setParsedCsv(parsed);
-                const rowCount = parsed.rows.length - (hasHeaderRow ? 1 : 0);
-                setCsvError(parsed.error || (value && rowCount < 1 ? "CSV must contain at least one data row." : rowCount > MAX_IMPORT_RECORDS ? `Imports support up to ${MAX_IMPORT_RECORDS.toLocaleString()} records at a time.` : ""));
+                if (new Blob([value]).size > MAX_IMPORT_BYTES) {
+                  parseRequestRef.current += 1;
+                  setParsingCsv(false);
+                  setCsvError("CSV content is limited to 25 MB.");
+                  return;
+                }
+                parseCsvInput(value);
               }} placeholder={"Paste CSV with field API names in the first row\nfirstName,lastName,phone"} className="min-h-24 w-full resize-y rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-xs leading-5 placeholder:font-sans placeholder:text-slate-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100" />
               <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
-                <span>{csv ? `${csvDataRows.length} data row${csvDataRows.length === 1 ? "" : "s"} detected` : "Map your CSV columns to CRM API fields below."}</span>
-                {csv && <button type="button" onClick={() => { setCsv(""); setParsedCsv({ rows: [], error: "" }); setCsvError(""); }} className="font-medium text-blue-700 hover:underline">Clear data</button>}
+                <span>{parsingCsv ? "Parsing CSV without blocking the page..." : csv ? `${csvDataRows.length} data row${csvDataRows.length === 1 ? "" : "s"} detected` : "Map your CSV columns to CRM API fields below."}</span>
+                {csv && <button type="button" onClick={() => { parseRequestRef.current += 1; setParsingCsv(false); setCsv(""); setParsedCsv({ rows: [], error: "" }); setCsvError(""); setPreviewPage(0); }} className="font-medium text-blue-700 hover:underline">Clear data</button>}
               </div>
               {csvError && <p role="alert" className="text-xs text-rose-700">{csvError}</p>}
             </div>
           </section>
+          {mode === "import" && objectName.trim().toLowerCase() === "lead" && (isAdmin || isSuperAdmin) && <section className="rounded-2xl bg-white p-4 shadow-sm">
+            <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-700">Lead status assignment profiles</h2>
+                <p className="mt-1 text-xs text-slate-500">Profile names are matched case-insensitively against eligible project queue members. Booked leads use the Booked Bucket when active; Lost leads use the administrator fallback.</p>
+              </div>
+              <Button type="button" variant="outline" size="sm" disabled={savingLeadImportProfiles || leadImportProfiles.length === 0} onClick={saveLeadImportProfiles}>
+                {savingLeadImportProfiles ? "Saving..." : "Save profiles"}
+              </Button>
+            </div>
+            {leadImportProfiles.length === 0 ? <p className="text-xs text-slate-500">Loading tenant assignment profiles...</p> : <div className="grid gap-2 sm:grid-cols-2">
+              {leadImportProfiles.map((profile) => <label key={profile.status} className="space-y-1 rounded-lg border border-slate-200 p-3">
+                <span className="flex items-center justify-between gap-2 text-xs font-medium text-slate-700"><span>{profile.status.replace(/_/g, " ")}</span><span className="text-[10px] text-slate-500">{profile.userType === "ADMIN_FALLBACK" ? "Admin fallback" : profile.userType}</span></span>
+                {profile.userType === "BOOKED_BUCKET"
+                  ? <p className="text-xs text-slate-500">Assigned through Booked Bucket settings.</p>
+                  : profile.userType === "ADMIN_FALLBACK"
+                  ? <p className="text-xs text-slate-500">System Administrator</p>
+                  : <Input aria-label={`${profile.status} eligible profiles`} value={profile.profileNames.join(", ")} onChange={(event) => {
+                    const profileNames = event.target.value.split(",").map((name) => name.trim()).filter(Boolean);
+                    setLeadImportProfiles((current) => current.map((item) => item.status === profile.status ? { ...item, profileNames } : item));
+                  }} placeholder="Profile names, comma-separated" className="h-8 text-xs" />}
+              </label>)}
+            </div>}
+          </section>}
 
           <section className="rounded-2xl bg-white p-4 shadow-sm">
             <div className="mb-3 flex items-start justify-between gap-3">
@@ -353,7 +604,7 @@ export default function DataOperationPage({ mode }: { mode: "import" | "update" 
                           <option value="">Do not import this column</option>
                           {fields.map((field) => {
                             const usedElsewhere = Object.entries(columnMappings).some(([mappedIndex, name]) => Number(mappedIndex) !== index && name === field.name);
-                            return <option key={field.name} value={field.name} disabled={usedElsewhere}>{field.label} ({field.name}){field.required ? " · Required" : ""}</option>;
+                            return <option key={field.name} value={field.name} disabled={usedElsewhere}>{field.label} ({field.name}) · {field.required ? "Required" : "Optional"}</option>;
                           })}
                         </select>
                       </div>;
@@ -383,16 +634,32 @@ export default function DataOperationPage({ mode }: { mode: "import" | "update" 
           <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
             <div>
               <h2 className="text-sm font-semibold text-slate-700">Data Preview</h2>
-              <p className="mt-0.5 text-[11px] text-slate-500">{previewRows.length ? `Showing the first ${Math.min(previewRows.length, PREVIEW_ROW_LIMIT)} of ${csvDataRows.length.toLocaleString()} records` : "Your CSV preview will appear here."}</p>
+              <p className="mt-0.5 text-[11px] text-slate-500">{previewRows.length ? `Showing ${Math.min(previewPage * IMPORT_PAGE_SIZE + 1, filteredPreviewRows.length)}–${Math.min((previewPage + 1) * IMPORT_PAGE_SIZE, filteredPreviewRows.length)} of ${filteredPreviewRows.length.toLocaleString()} matching records (${csvDataRows.length.toLocaleString()} total)` : "Your CSV preview will appear here."}</p>
             </div>
-            {csv && <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-medium text-slate-600">{previewHeaders.length} columns</span>}
+            {csv && <div className="flex items-center gap-2"><Input aria-label="Filter preview rows" value={previewFilter} onChange={(event) => { setPreviewFilter(event.target.value); setPreviewPage(0); }} placeholder="Filter rows" className="h-8 max-w-48 text-xs" /><span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-medium text-slate-600">{previewHeaders.length} columns</span></div>}
           </div>
           {previewRows.length > 0 ? <div aria-label="CSV data preview rows" className="max-h-[55vh] overscroll-contain overflow-auto">
             <table className="w-full min-w-max border-collapse text-left text-xs">
-              <thead className="sticky top-0 bg-slate-50 text-slate-600"><tr>{previewHeaders.map((header, index) => <th key={`${header}-${index}`} className="border-b border-r border-slate-200 px-3 py-2 font-semibold last:border-r-0">{header || `Column ${index + 1}`}</th>)}</tr></thead>
-              <tbody>{previewRows.slice(0, PREVIEW_ROW_LIMIT).map((row, rowIndex) => <tr key={rowIndex} className="even:bg-slate-50/70">{previewHeaders.map((header, columnIndex) => <td key={`${header}-${columnIndex}`} className="max-w-64 truncate border-b border-r border-slate-100 px-3 py-2 text-slate-600 last:border-r-0">{row[columnIndex] || <span className="text-slate-300">—</span>}</td>)}</tr>)}</tbody>
+              <thead className="sticky top-0 bg-slate-50 text-slate-600"><tr><th className="border-b border-r border-slate-200 px-3 py-2 font-semibold">CSV row</th>{previewHeaders.map((header, index) => <th key={`${header}-${index}`} className="border-b border-r border-slate-200 px-3 py-2 font-semibold last:border-r-0">{header || `Column ${index + 1}`}</th>)}<th className="border-b border-r border-slate-200 px-3 py-2 font-semibold">Lead status</th><th className="border-b border-r border-slate-200 px-3 py-2 font-semibold">Assignment plan</th></tr></thead>
+              <tbody>{pagedPreviewRows.map(({ row, index }) => <tr key={index} className="even:bg-slate-50/70"><td className="border-b border-r border-slate-100 px-3 py-2 text-slate-600">{index + (hasHeaderRow ? 2 : 1)}</td>{previewHeaders.map((header, columnIndex) => <td key={`${header}-${columnIndex}`} className="max-w-64 truncate border-b border-r border-slate-100 px-3 py-2 text-slate-600 last:border-r-0">{row[columnIndex] || <span className="text-slate-300">—</span>}</td>)}<td className="border-b border-r border-slate-100 px-3 py-2 text-slate-600">{getRoutingPreview(row).status}</td><td className="border-b border-r border-slate-100 px-3 py-2 text-slate-600">{getRoutingPreview(row).assignment}</td></tr>)}</tbody>
             </table>
           </div> : <div className="grid min-h-24 place-items-center px-4 text-center text-xs text-slate-400">Choose a CSV file or paste CSV data to preview records.</div>}
+          {csv && filteredPreviewRows.length > 0 && <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 px-4 py-2 text-xs text-slate-500">
+            <span>Preview page {previewPage + 1} of {previewPageCount}</span>
+            <div className="flex flex-wrap items-center gap-1">
+              <button type="button" disabled={previewPage === 0} onClick={() => setPreviewPage(0)} className="rounded border px-2 py-1 disabled:opacity-40">First</button>
+              <button type="button" disabled={previewPage === 0} onClick={() => setPreviewPage((page) => page - 1)} className="rounded border px-2 py-1 disabled:opacity-40">Previous</button>
+              {getPageNumbers(previewPage, previewPageCount).map((page) => <button key={page} type="button" aria-current={page === previewPage ? "page" : undefined} onClick={() => setPreviewPage(page)} className={`rounded border px-2 py-1 ${page === previewPage ? "border-blue-600 bg-blue-50 text-blue-700" : ""}`}>{page + 1}</button>)}
+              <label className="flex items-center gap-1">Page <input aria-label="Go to preview page" type="number" min={1} max={previewPageCount} value={previewPageInput} onChange={(event) => setPreviewPageInput(event.target.value)} onBlur={() => {
+                const next = Number(previewPageInput);
+                setPreviewPage(next >= 1 && next <= previewPageCount ? next - 1 : previewPage);
+              }} onKeyDown={(event) => {
+                if (event.key === "Enter") event.currentTarget.blur();
+              }} className="h-7 w-14 rounded border px-1 text-center" /> of {previewPageCount}</label>
+              <button type="button" disabled={previewPage + 1 >= previewPageCount} onClick={() => setPreviewPage((page) => page + 1)} className="rounded border px-2 py-1 disabled:opacity-40">Next</button>
+              <button type="button" disabled={previewPage + 1 >= previewPageCount} onClick={() => setPreviewPage(previewPageCount - 1)} className="rounded border px-2 py-1 disabled:opacity-40">Last</button>
+            </div>
+          </div>}
         </section>
       </div>
     </div>;

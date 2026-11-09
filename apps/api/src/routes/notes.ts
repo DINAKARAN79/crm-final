@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { EffectivePermissionService } from '../services/effectivePermissions';
 import { canAccessLead } from '../services/recordAccess';
+import { getTenantTimezone } from '../services/tenantTimezone';
 
 const router = Router();
 
@@ -47,9 +48,9 @@ async function canAccessNoteRecord(user: NonNullable<AuthRequest['user']>, recor
   return canAccessLead(user, record);
 }
 
-function formatIndiaTimestamp(date: Date): string {
+function formatTenantTimestamp(date: Date, timeZone: string): string {
   const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'Asia/Kolkata',
+    timeZone,
     month: 'long',
     day: '2-digit',
     year: 'numeric',
@@ -62,11 +63,11 @@ function formatIndiaTimestamp(date: Date): string {
   return `${value('month')} ${value('day')}, ${value('year')} ${value('hour')}:${value('minute')}:${value('second')} ${value('dayPeriod')}`;
 }
 
-function appendNote(existingNotes: string | null, author: string, note: string): { notes: string; number: number } {
+function appendNote(existingNotes: string | null, author: string, note: string, timeZone: string): { notes: string; number: number } {
   const history = existingNotes || '';
   const numbers = Array.from(history.matchAll(/\bNote\s+(\d+):/gi), (match) => Number(match[1]));
   const number = Math.max(0, ...numbers) + 1;
-  const entry = `Note ${number}: (${author}) - (${formatIndiaTimestamp(new Date())}):\n${note}`;
+  const entry = `Note ${number}: (${author}) - (${formatTenantTimestamp(new Date(), timeZone)}):\n${note}`;
   return { notes: history ? `${history}\n\n${entry}` : entry, number };
 }
 
@@ -106,6 +107,7 @@ router.post('/:recordId', async (req: AuthRequest, res: Response) => {
     });
     if (!author) return res.status(401).json({ success: false, error: 'Authenticated user not found' });
     const authorName = [author.firstName, author.lastName].filter(Boolean).join(' ') || 'CRM User';
+    const timeZone = await getTenantTimezone(record.tenantId);
 
     const result = await prisma.$transaction(async (tx) => {
       if (record.type === 'Lead') {
@@ -115,7 +117,7 @@ router.post('/:recordId', async (req: AuthRequest, res: Response) => {
           select: { notes: true },
         });
         if (!current) throw new Error('Note record no longer exists');
-        const updated = appendNote(current.notes, authorName, note);
+        const updated = appendNote(current.notes, authorName, note, timeZone);
         await tx.lead.update({ where: { id: record.id }, data: { notes: updated.notes } });
         await tx.auditLog.create({
           data: {
@@ -137,7 +139,7 @@ router.post('/:recordId', async (req: AuthRequest, res: Response) => {
         select: { notes: true },
       });
       if (!current) throw new Error('Note record no longer exists');
-      const updated = appendNote(current.notes, authorName, note);
+      const updated = appendNote(current.notes, authorName, note, timeZone);
       await tx.lead.update({ where: { id: record.id }, data: { notes: updated.notes } });
       await tx.auditLog.create({
         data: {

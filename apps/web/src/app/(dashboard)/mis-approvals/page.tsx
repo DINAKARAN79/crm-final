@@ -15,6 +15,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { BookingCancellationRequests } from "@/components/crm/booking-cancellation-requests";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
+import { formatDate } from "@/lib/date-format";
 import { matchesApprovalPacketSearch } from "@/lib/mis-approval-search";
 import { ListSortHeader, useListView, useRecordView } from "@/components/crm/list-view-control";
 
@@ -83,6 +84,24 @@ interface ApprovalPacket {
   reviewedBy?: { firstName: string; lastName: string } | null;
 }
 
+interface RefundApproval {
+  id: string;
+  amount: number;
+  customerName: string;
+  customerPhone?: string | null;
+  customerEmail?: string | null;
+  reason: string;
+  refundReference: string;
+  status: ApprovalStatus;
+  submittedAt: string;
+  reviewedAt?: string | null;
+  reviewedBy?: { firstName: string; lastName: string } | null;
+  booking: { bookingNumber: string; status: string; project: { name: string }; unit: { number: string } };
+  lead: { id: string; leadNumber?: string | null; firstName?: string | null; lastName: string };
+  createdBy: { firstName: string; lastName: string };
+  reviewNote?: string | null;
+}
+
 type QueueFilter = "PENDING_APPROVAL" | "REVIEWED" | "ALL";
 
 const PAGE_SIZE = 10;
@@ -113,9 +132,7 @@ function siteVisitText(packet: ApprovalPacket) {
 
 const currency = (amount: number) =>
   new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 2 }).format(amount);
-const dateText = (value?: string | null) => value
-  ? new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeZone: "Asia/Kolkata" }).format(new Date(value))
-  : "—";
+const dateText = (value?: string | null) => value ? formatDate(value) : "—";
 const text = (value: unknown) => {
   if (value === null || value === undefined || value === "") return "—";
   if (typeof value === "boolean") return value ? "Yes" : "No";
@@ -221,6 +238,7 @@ export default function MISApprovalsPage() {
   const { getLeadStatusLabel } = useAuth();
   const listViews = useListView("MIS_APPROVAL");
   const [packets, setPackets] = React.useState<ApprovalPacket[]>([]);
+  const [refundPackets, setRefundPackets] = React.useState<RefundApproval[]>([]);
   const [filter, setFilter] = React.useState<QueueFilter>("ALL");
   const [searchQuery, setSearchQuery] = React.useState("");
   const [dateFrom, setDateFrom] = React.useState("");
@@ -239,8 +257,12 @@ export default function MISApprovalsPage() {
     setLoading(true);
     setLoadError("");
     try {
-      const response = await receiptApi.listApprovals(listViews.params);
+      const [response, refundResponse] = await Promise.all([
+        receiptApi.listApprovals(listViews.params),
+        receiptApi.listRefundApprovals(),
+      ]);
       setPackets((response.data.data || []) as ApprovalPacket[]);
+      setRefundPackets((refundResponse.data.data || []) as RefundApproval[]);
     } catch (cause) {
       console.error("Failed to load MIS approval packets:", cause);
       const message = (cause as { response?: { data?: { error?: string } } }).response?.data?.error;
@@ -306,6 +328,10 @@ export default function MISApprovalsPage() {
         note: notes[packet.id]?.trim() || undefined,
       });
       const assignedCRMUserId = response.data.data?.assignment?.assignedUserId as string | undefined;
+      const bucketAssignment = response.data.data?.bucketAssignment;
+      const bucketOwnerName = [bucketAssignment?.owner?.firstName, bucketAssignment?.owner?.lastName]
+        .filter((name: unknown): name is string => typeof name === "string" && name.length > 0)
+        .join(" ");
       setPackets((current) => current.map((item) => item.id === packet.id
         ? {
             ...item,
@@ -317,7 +343,9 @@ export default function MISApprovalsPage() {
       toast({
         title: decision === "APPROVE" ? "Packet approved" : "Packet rejected",
         description: decision === "APPROVE"
-          ? `The lead was assigned to CRM${assignedCRMUserId ? ` (${assignedCRMUserId})` : ""} by round robin.`
+          ? bucketAssignment?.moved && bucketOwnerName
+            ? `Lead moved to Booked Bucket owner ${bucketOwnerName}. The original CRM booking owner remains recorded.`
+            : `The lead was assigned to CRM${assignedCRMUserId ? ` (${assignedCRMUserId})` : ""} by round robin.`
           : "The packet was rejected and the reserved unit was released.",
       });
     } catch (cause) {
@@ -328,6 +356,30 @@ export default function MISApprovalsPage() {
         description: message || "Please refresh and try again.",
         variant: "destructive",
       });
+    } finally {
+      setReviewingId(null);
+    }
+  };
+
+  const reviewRefund = async (packet: RefundApproval, decision: "APPROVE" | "REJECT") => {
+    setReviewingId(packet.id);
+    try {
+      const response = await receiptApi.reviewRefundApproval(packet.id, {
+        decision,
+        note: notes[packet.id]?.trim() || undefined,
+      });
+      const updated = response.data.data as RefundApproval;
+      setRefundPackets((current) => current.map((item) => item.id === packet.id ? updated : item));
+      toast({
+        title: decision === "APPROVE" ? "Refund approved" : "Refund rejected",
+        description: decision === "APPROVE"
+          ? `${currency(packet.amount)} was approved. The booking remains unchanged.`
+          : "The request was rejected and no payment balance was changed.",
+      });
+    } catch (cause) {
+      console.error(`Failed to ${decision.toLowerCase()} refund request:`, cause);
+      const message = (cause as { response?: { data?: { error?: string } } }).response?.data?.error;
+      toast({ title: "Could not review refund", description: message || "Please refresh and try again.", variant: "destructive" });
     } finally {
       setReviewingId(null);
     }
@@ -494,6 +546,53 @@ export default function MISApprovalsPage() {
           </div>
         </div>
       )}
+
+      <Card>
+        <div className="flex items-center justify-between border-b border-sky-100 px-4 py-3">
+          <div>
+            <h2 className="text-sm font-semibold text-[#075d91]">Refund Requests</h2>
+            <p className="text-xs text-slate-500">Refund approval changes the paid balance only; it does not cancel the booking.</p>
+          </div>
+          <Badge variant="secondary">{refundPackets.filter((packet) => packet.status === "PENDING_APPROVAL").length} pending</Badge>
+        </div>
+        {refundPackets.length === 0 ? (
+          <CardContent className="py-6 text-center text-sm text-slate-500">No refund requests have been submitted.</CardContent>
+        ) : (
+          <div className="divide-y">
+            {refundPackets.map((packet) => (
+              <div key={packet.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
+                <div className="min-w-[14rem] flex-1">
+                  <p className="text-sm font-semibold text-slate-800">{packet.refundReference} · {packet.customerName}</p>
+                  <p className="text-xs text-slate-500">
+                    {packet.booking.bookingNumber} · {packet.booking.project.name} · Unit {packet.booking.unit.number}
+                    {" · "}{packet.lead.leadNumber || packet.lead.id} · Submitted {dateText(packet.submittedAt)}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-600">{packet.reason}</p>
+                  <p className="text-xs text-slate-500">{packet.customerPhone || "No phone"} · {packet.customerEmail || "No email"}</p>
+                  {packet.reviewedBy && (
+                    <p className="text-xs text-slate-500">
+                      Reviewed by {[packet.reviewedBy.firstName, packet.reviewedBy.lastName].filter(Boolean).join(" ")}
+                      {packet.reviewedAt ? ` · ${dateText(packet.reviewedAt)}` : ""}
+                    </p>
+                  )}
+                </div>
+                <p className="text-sm font-semibold text-slate-900">{currency(packet.amount)}</p>
+                <Badge variant={statusVariant(packet.status)}>{statusLabel(packet.status)}</Badge>
+                {packet.status === "PENDING_APPROVAL" && (
+                  <div className="flex gap-2">
+                    <Button type="button" size="sm" variant="outline" disabled={reviewingId !== null} onClick={() => void reviewRefund(packet, "REJECT")} className="text-rose-700">
+                      {reviewingId === packet.id ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <X className="mr-1 h-4 w-4" />}Reject
+                    </Button>
+                    <Button type="button" size="sm" disabled={reviewingId !== null} onClick={() => void reviewRefund(packet, "APPROVE")} className="bg-emerald-700 text-white hover:bg-emerald-800">
+                      {reviewingId === packet.id ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Check className="mr-1 h-4 w-4" />}Approve
+                    </Button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
 
       <Dialog open={selected !== null} onOpenChange={(open) => { if (!open) setSelectedId(null); }}>
         <DialogContent className="crm-approval-dialog gap-0 p-0" showClose={false}>

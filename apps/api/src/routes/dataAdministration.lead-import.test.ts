@@ -16,6 +16,17 @@ const mocks = vi.hoisted(() => ({
   findUser: vi.fn(),
   findLead: vi.fn(),
   findLeadDuplicatesBatch: vi.fn(),
+  findEnquiry: vi.fn(),
+  updateLead: vi.fn(),
+  updateEnquiry: vi.fn(),
+  canAccessLead: vi.fn(),
+  createLeadImportJob: vi.fn(),
+  updateLeadImportJob: vi.fn(),
+  findLeadImportProfiles: vi.fn(),
+  findBookedBucketSetting: vi.fn(),
+  createAuditLog: vi.fn(),
+  upsertLeadImportProfile: vi.fn(),
+  isAdmin: true,
 }));
 
 vi.mock('@dct-crm/db', () => ({
@@ -23,9 +34,20 @@ vi.mock('@dct-crm/db', () => ({
     project: { findFirst: mocks.findProject, update: mocks.updateProject },
     unit: { create: mocks.createUnit, findFirst: mocks.findUnit },
     user: { findFirst: mocks.findUser },
-    lead: { findFirst: mocks.findLead },
+    lead: { findFirst: mocks.findLead, update: mocks.updateLead },
+    enquiry: { findFirst: mocks.findEnquiry, update: mocks.updateEnquiry },
+    leadImportJob: { create: mocks.createLeadImportJob, update: mocks.updateLeadImportJob },
+    leadImportStatusProfile: { findMany: mocks.findLeadImportProfiles, upsert: mocks.upsertLeadImportProfile },
+    bookedBucketSetting: { findUnique: mocks.findBookedBucketSetting },
+    auditLog: { create: mocks.createAuditLog },
     $queryRaw: mocks.queryRaw,
-    $transaction: (operations: Promise<unknown>[]) => Promise.all(operations),
+    $transaction: (operations: any) => typeof operations === 'function'
+      ? operations({
+          lead: { update: mocks.updateLead },
+          enquiry: { update: mocks.updateEnquiry },
+          auditLog: { create: vi.fn() },
+        })
+      : Promise.all(operations),
   },
   unitFieldTags: (unit: Record<string, unknown>) => ({
     Unit_Number__c: unit.number ?? null,
@@ -35,7 +57,7 @@ vi.mock('@dct-crm/db', () => ({
 }));
 vi.mock('../middleware/auth', () => ({
   authenticate: (req: any, _res: any, next: any) => {
-    req.user = { id: 'import-user', tenantId: 'tenant-a', profileName: 'Admin' };
+    req.user = { id: 'import-user', tenantId: 'tenant-a', profileName: 'Admin', isAdmin: mocks.isAdmin, isSuperAdmin: false };
     req.tenantId = 'tenant-a';
     next();
   },
@@ -50,6 +72,13 @@ vi.mock('../services/dynamicCrud', () => ({
 vi.mock('../services/metadata', () => ({
   getObjectDefinition: mocks.getObjectDefinition,
   getFieldDefinitions: mocks.getFieldDefinitions,
+}));
+vi.mock('../services/recordAccess', () => ({
+  applyScope: (where: any, scope: any) => ({ ...where, ...scope }),
+  canAccessLead: mocks.canAccessLead,
+  getLeadRecordScope: vi.fn().mockResolvedValue(null),
+  getScopeClause: vi.fn().mockResolvedValue(null),
+  leadScopeClause: vi.fn().mockReturnValue(null),
 }));
 vi.mock('../services/enquiryProcessing', () => ({
   processLeadEnquiry: vi.fn(),
@@ -144,6 +173,21 @@ async function importLeads(csv: string, fields = ['firstName', 'lastName', 'phon
   });
 }
 
+async function requestLeadImportProfiles(method: 'GET' | 'PUT', body?: unknown) {
+  const app = express();
+  app.use(express.json());
+  app.use('/api/data', dataAdministrationRoutes);
+  const server = app.listen(0);
+  servers.push(server);
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Expected a TCP server address');
+  return fetch(`http://127.0.0.1:${address.port}/api/data/import/lead-status-profiles`, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+}
+
 async function importUnits(csv: string, fields: string[]) {
   const app = express();
   app.use(express.json({ limit: '100mb' }));
@@ -178,6 +222,21 @@ async function importCustomObject(csv: string) {
   });
 }
 
+async function updateLeads(csv: string, fields = ['originalSubmissionId', 'source', 'phone']) {
+  const app = express();
+  app.use(express.json({ limit: '100mb' }));
+  app.use('/api/data', dataAdministrationRoutes);
+  const server = app.listen(0);
+  servers.push(server);
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Expected a TCP server address');
+  return fetch(`http://127.0.0.1:${address.port}/api/data/update`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ objectName: 'Lead', fields, csv }),
+  });
+}
+
 async function exportCustomObject() {
   const app = express();
   app.use(express.json());
@@ -191,8 +250,16 @@ async function exportCustomObject() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.isAdmin = true;
   mocks.getObjectDefinition.mockResolvedValue({ id: 'lead-object' });
   mocks.findProject.mockResolvedValue({ id: 'project-a' });
+  mocks.findUser.mockResolvedValue({ id: 'admin-a' });
+  mocks.findLeadImportProfiles.mockResolvedValue([]);
+  mocks.findBookedBucketSetting.mockResolvedValue(null);
+  mocks.createLeadImportJob.mockResolvedValue({ id: 'import-job-a' });
+  mocks.updateLeadImportJob.mockResolvedValue({ id: 'import-job-a' });
+  mocks.createAuditLog.mockResolvedValue({ id: 'audit-a' });
+  mocks.upsertLeadImportProfile.mockResolvedValue({ id: 'profile-a' });
   mocks.getFieldDefinitions.mockResolvedValue(
     ['firstName', 'lastName', 'phone', 'email', 'source'].map((name) => ({
       name,
@@ -215,6 +282,28 @@ beforeEach(() => {
   mocks.findLeadDuplicatesBatch.mockImplementation(async (_db: unknown, _tenantId: string, inputs: unknown[]) =>
     inputs.map(() => []),
   );
+  mocks.canAccessLead.mockResolvedValue(true);
+  mocks.findEnquiry.mockResolvedValue({
+    id: 'enquiry-a',
+    tenantId: 'tenant-a',
+    originalSubmissionId: 'WEBSITE:external-1',
+    source: 'WEBSITE',
+    leadId: 'lead-a',
+    phone: '9876543210',
+    countryCode: '91',
+    lead: {
+      id: 'lead-a',
+      tenantId: 'tenant-a',
+      firstName: 'Old',
+      lastName: 'Lead',
+      phone: '9876543210',
+      email: null,
+      source: 'WEBSITE',
+      customFields: { existing: 'kept' },
+      ownerId: 'import-user',
+      creatorId: 'import-user',
+    },
+  });
 });
 
 afterEach(async () => {
@@ -224,6 +313,35 @@ afterEach(async () => {
 });
 
 describe('POST /api/data/import Lead batching', () => {
+  it('restricts Lead imports to tenant administrators', async () => {
+    mocks.isAdmin = false;
+    const response = await importLeads('firstName,lastName,phone,source\nNew,Lead,9876543210,WEBSITE');
+
+    expect(response.status).toBe(403);
+    expect(mocks.processLeadEnquiryBatch).not.toHaveBeenCalled();
+    expect(mocks.createLeadImportJob).not.toHaveBeenCalled();
+  });
+
+  it('loads and saves tenant-scoped status profile settings', async () => {
+    mocks.findLeadImportProfiles.mockResolvedValue([{ status: 'NEW', profileNames: ['New Intake'] }]);
+    const loaded = await requestLeadImportProfiles('GET');
+    expect(loaded.status).toBe(200);
+    const loadedPayload = await loaded.json() as {
+      data: { profiles: Array<{ status: string; profileNames: string[]; userType: string }> };
+    };
+    expect(loadedPayload.data.profiles).toEqual(expect.arrayContaining([{ status: 'NEW', profileNames: ['New Intake'], userType: 'Pre Sales' }]));
+    expect(mocks.findLeadImportProfiles).toHaveBeenCalledWith({ where: { tenantId: 'tenant-a' } });
+
+    const saved = await requestLeadImportProfiles('PUT', {
+      profiles: [{ status: 'NEW', profileNames: ['New Intake'] }],
+    });
+    expect(saved.status).toBe(200);
+    expect(mocks.upsertLeadImportProfile).toHaveBeenCalledWith(expect.objectContaining({
+      where: { tenantId_status: { tenantId: 'tenant-a', status: 'NEW' } },
+      create: expect.objectContaining({ tenantId: 'tenant-a', updatedById: 'import-user' }),
+    }));
+  });
+
   it('submits all rows to one transactional batch operation and reports linked enquiries', async () => {
     const response = await importLeads(
       'firstName,lastName,phone,source\nNew,Unique,9876543210,WEBSITE\nExisting,Duplicate,9876543211,REFERRAL',
@@ -243,6 +361,61 @@ describe('POST /api/data/import Lead batching', () => {
         ],
       },
     });
+
+    describe('POST /api/data/update Lead', () => {
+      it('updates only the tenant Lead matched by the explicit source-system ID and preserves blanks', async () => {
+        const response = await updateLeads(
+          'originalSubmissionId,source,phone\nexternal-1,WEBSITE,',
+        );
+
+        expect(response.status).toBe(200);
+        expect(mocks.findEnquiry).toHaveBeenCalledWith({
+          where: { tenantId: 'tenant-a', originalSubmissionId: 'WEBSITE:external-1' },
+          include: { lead: true },
+        });
+        expect(mocks.updateLead).toHaveBeenCalledWith({
+          where: { id: 'lead-a' },
+          data: { source: 'WEBSITE' },
+        });
+        await expect(response.json()).resolves.toMatchObject({
+          success: true,
+          data: { count: 1, rowResults: [{ index: 0, status: 'success' }] },
+        });
+      });
+
+      it('creates an unmatched Lead only when the explicit source-system ID and required data are supplied', async () => {
+        mocks.findEnquiry.mockResolvedValueOnce(null);
+        const response = await updateLeads(
+          'originalSubmissionId,source,phone,lastName\nexternal-new,WEBSITE,9876543212,New',
+          ['originalSubmissionId', 'source', 'phone', 'lastName'],
+        );
+
+        expect(response.status).toBe(200);
+        expect(mocks.processLeadEnquiryBatch).toHaveBeenCalledWith(
+          [expect.objectContaining({
+            tenantId: 'tenant-a',
+            lead: expect.objectContaining({ lastName: 'New', phone: '9876543212', source: 'WEBSITE' }),
+            enquiry: expect.objectContaining({ source: 'WEBSITE', originalSubmissionId: 'external-new' }),
+          })],
+          { rejectDuplicates: true },
+        );
+        await expect(response.json()).resolves.toMatchObject({
+          success: true,
+          data: { count: 1, created: 1, updated: 0 },
+        });
+      });
+
+      it('refuses to update Leads without an explicit external/source-system ID mapping', async () => {
+        const response = await updateLeads('source,phone\nWEBSITE,9876543210', ['source', 'phone']);
+
+        expect(response.status).toBe(400);
+        await expect(response.json()).resolves.toMatchObject({
+          success: false,
+          error: expect.stringContaining('Contact details are never used as update keys'),
+        });
+        expect(mocks.findEnquiry).not.toHaveBeenCalled();
+      });
+    });
   });
 
   it('accepts 50,000 lead rows and processes them in bounded batches', async () => {
@@ -259,8 +432,8 @@ describe('POST /api/data/import Lead batching', () => {
     const response = await importLeads(csv);
 
     expect(response.status).toBe(201);
-    expect(mocks.processLeadEnquiryBatch).toHaveBeenCalledTimes(50);
-    expect(mocks.processLeadEnquiryBatch.mock.calls.every(([batch]) => batch.length <= 1_000)).toBe(true);
+    expect(mocks.processLeadEnquiryBatch).toHaveBeenCalledTimes(100);
+    expect(mocks.processLeadEnquiryBatch.mock.calls.every(([batch]) => batch.length <= 500)).toBe(true);
     await expect(response.json()).resolves.toMatchObject({
       success: true,
       data: { count: 50_000, linkedEnquiries: 0 },
@@ -286,8 +459,121 @@ describe('POST /api/data/import Lead batching', () => {
 
     expect(response.status).toBe(201);
     expect(mocks.processLeadEnquiryBatch.mock.calls[0][0]).toMatchObject([
-      { lead: { status: 'NEW' } },
-      { lead: { status: 'SITE_VISIT_SCHEDULED' } },
+      { lead: { status: 'NEW' }, importAssignment: { status: 'NEW', userType: 'Pre Sales', fallbackOwnerId: 'admin-a' } },
+      { lead: { status: 'SITE_VISIT_SCHEDULED' }, importAssignment: { status: 'SITE_VISIT_SCHEDULED', userType: 'SVC' } },
+    ]);
+  });
+
+  it('uses tenant-configured profile names and accepts an active mapped Owner override', async () => {
+    mocks.findLeadImportProfiles.mockResolvedValue([{ status: 'NEW', profileNames: ['New Intake'] }]);
+    mocks.findUser
+      .mockResolvedValueOnce({ id: 'admin-a' })
+      .mockResolvedValueOnce({ id: 'owner-b' });
+    const response = await importLeads(
+      'firstName,lastName,phone,source,status,ownerId\nNew,Lead,9876543210,WEBSITE,New,owner@example.com',
+      ['firstName', 'lastName', 'phone', 'source', 'status', 'ownerId'],
+    );
+
+    expect(response.status).toBe(201);
+    expect(mocks.processLeadEnquiryBatch.mock.calls[0][0]).toMatchObject([{
+      importAssignment: {
+        status: 'NEW',
+        fallbackOwnerId: 'admin-a',
+        importJobId: 'import-job-a',
+        ownerId: 'owner-b',
+        userType: 'Pre Sales',
+        profileNames: ['New Intake'],
+      },
+    }]);
+    await expect(response.json()).resolves.toMatchObject({
+      data: { job: { id: 'import-job-a', status: 'COMPLETED', createdCount: 1 } },
+    });
+  });
+
+  it('rejects a mapped Owner that is not active in the authenticated tenant', async () => {
+    mocks.findUser
+      .mockResolvedValueOnce({ id: 'admin-a' })
+      .mockResolvedValueOnce(null);
+    const response = await importLeads(
+      'firstName,lastName,phone,source,ownerId\nNew,Lead,9876543210,WEBSITE,inactive@example.com',
+      ['firstName', 'lastName', 'phone', 'source', 'ownerId'],
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      data: { rowResults: [{ row: 2, status: 'failed', error: expect.stringContaining('Mapped owner was not found or is inactive') }] },
+    });
+    expect(mocks.processLeadEnquiryBatch).not.toHaveBeenCalled();
+  });
+
+  it('rejects unknown status labels with a row-specific validation error', async () => {
+    const response = await importLeads(
+      'firstName,lastName,phone,source,status\nNew,Lead,9876543210,WEBSITE,Not a status',
+      ['firstName', 'lastName', 'phone', 'source', 'status'],
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      success: false,
+      data: { rowResults: [{ index: 0, row: 2, status: 'failed', error: expect.stringContaining('Invalid Lead status') }] },
+    });
+    expect(mocks.processLeadEnquiryBatch).not.toHaveBeenCalled();
+  });
+
+  it('defaults blank status to NEW and sends Booked leads to the administrator fallback', async () => {
+    const response = await importLeads(
+      'firstName,lastName,phone,source,status\nNew,Lead,9876543210,WEBSITE,\nBooked,Lead,9876543211,WEBSITE,Booked',
+      ['firstName', 'lastName', 'phone', 'source', 'status'],
+    );
+
+    expect(response.status).toBe(201);
+    expect(mocks.processLeadEnquiryBatch.mock.calls[0][0]).toMatchObject([
+      { importAssignment: { status: 'NEW', userType: 'Pre Sales', fallbackOwnerId: 'admin-a' } },
+      { importAssignment: { status: 'BOOKED', userType: undefined, fallbackOwnerId: 'admin-a' } },
+    ]);
+  });
+
+  it('validates Lead rows independently and imports valid rows alongside invalid rows', async () => {
+    const response = await importLeads(
+      'firstName,lastName,phone,source\nMissing,,9876543210,WEBSITE\nValid,Lead,9876543211,WEBSITE',
+    );
+
+    expect(response.status).toBe(201);
+    expect(mocks.processLeadEnquiryBatch).toHaveBeenCalledOnce();
+    expect(mocks.processLeadEnquiryBatch.mock.calls[0][0]).toHaveLength(1);
+    await expect(response.json()).resolves.toMatchObject({
+      success: true,
+      data: {
+        count: 1,
+        errors: [{ index: 0, row: 2 }],
+        rowResults: [
+          { index: 0, row: 2, status: 'failed' },
+          { index: 1, row: 3, status: 'success' },
+        ],
+      },
+    });
+  });
+
+  it('maps supported custom Lead fields into customFields while preserving standard fields', async () => {
+    mocks.getFieldDefinitions.mockResolvedValue([
+      ...['firstName', 'lastName', 'phone', 'source'].map((name) => ({
+        name,
+        required: false,
+        isActive: true,
+        isSystemField: false,
+        fieldType: 'text',
+      })),
+      { name: 'External_Region__c', label: 'External Region', required: false, isActive: true, isSystemField: false, fieldType: 'text' },
+    ]);
+
+    const response = await importLeads(
+      'firstName,lastName,phone,source,External_Region__c\nAva,Lead,9876543210,WEBSITE,South',
+      ['firstName', 'lastName', 'phone', 'source', 'External_Region__c'],
+    );
+
+    expect(response.status).toBe(201);
+    expect(mocks.processLeadEnquiryBatch.mock.calls[0][0]).toMatchObject([
+      { lead: { firstName: 'Ava', customFields: { External_Region__c: 'South' } } },
     ]);
   });
 

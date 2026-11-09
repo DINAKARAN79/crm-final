@@ -85,7 +85,9 @@ describe("BizcallDialpadDock dialpad URL flow", () => {
       } },
     });
     dockMocks.dialpadCallStarted.mockReset().mockResolvedValue(callStartedResponse());
-    dockMocks.dialpadEvent.mockReset().mockResolvedValue({ data: { success: true } });
+    dockMocks.dialpadEvent.mockReset().mockResolvedValue({
+      data: { success: true, data: { callDetailId: "call-detail-1", disposition: "Interested", notes: "Call me tomorrow" } },
+    });
     dockMocks.dialHandler = undefined;
   });
 
@@ -209,5 +211,43 @@ describe("BizcallDialpadDock dialpad URL flow", () => {
     await waitFor(() => expect(screen.getByText(
       "The browser blocked the microphone for this site. Click the lock icon in the address bar, set Microphone to Allow, and reload.",
     )).toBeInTheDocument());
+  });
+
+  it("shows disposition success only after persistence and retries the same idempotent call safely", async () => {
+    dockMocks.dialpadEvent.mockReset().mockRejectedValue(new Error("temporary network failure"));
+    await act(async () => {
+      render(<BizcallDialpadDock />);
+      await Promise.resolve();
+    });
+    await screen.findByTitle("Bizcall dialpad");
+    await act(async () => {
+      await dockMocks.dialHandler?.({ leadId: "lead-1", phoneField: "phone", leadName: "Lead One" });
+    });
+    const iframe = screen.getByTitle("Bizcall dialpad") as HTMLIFrameElement;
+    fireEvent.load(iframe);
+    await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 0)); });
+
+    await act(async () => {
+      window.dispatchEvent(new MessageEvent("message", {
+        origin: "https://bizcall.cxteletech.com",
+        source: iframe.contentWindow,
+        data: { type: "BIZCALL_DISPOSITION_SUBMITTED", disposition: "Interested", notes: "Call me tomorrow" },
+      }));
+    });
+    await screen.findByRole("button", { name: "Retry" });
+    expect(screen.queryByText(/Disposition saved/)).toBeNull();
+    expect(dockMocks.dialpadEvent).toHaveBeenCalledTimes(3);
+
+    dockMocks.dialpadEvent.mockResolvedValue({
+      data: { success: true, data: { callDetailId: "call-detail-1", disposition: "Interested", notes: "Call me tomorrow" } },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(screen.getByText(/Disposition saved · Interested · Notes saved/)).toBeInTheDocument());
+    expect(dockMocks.dialpadEvent).toHaveBeenCalledTimes(4);
+    expect(dockMocks.dialpadEvent.mock.calls[0][0]).toEqual(dockMocks.dialpadEvent.mock.calls[3][0]);
   });
 });

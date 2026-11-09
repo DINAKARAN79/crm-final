@@ -6,6 +6,7 @@ import { canAccessLead } from '../services/recordAccess';
 import { getEnquiryById } from '../services/enquiryService';
 import { applyEnquiryAttributePatch, ENQUIRY_ATTRIBUTE_KEYS } from '../services/enquiryFieldMap';
 import { backfillEnquiryAttributes } from '../services/enquiryBackfill';
+import { getLeadPicklistOptions } from '../services/leadPicklists';
 import { z } from 'zod';
 
 const router = Router();
@@ -108,6 +109,13 @@ router.put('/:id', authorize('Enquiry', 'edit'), async (req: AuthRequest, res: R
     if (!enquiry) return res.status(404).json({ success: false, error: 'Enquiry not found' });
     if (!(await canAccessLead(req.user!, enquiry.lead))) {
       return res.status(403).json({ success: false, error: 'You do not have access to this enquiry' });
+    }
+
+    if (payload.source !== undefined && payload.source !== enquiry.source) {
+      const sourceOptions = (await getLeadPicklistOptions(enquiry.tenantId)).get('source');
+      if (!sourceOptions?.has(payload.source)) {
+        return res.status(400).json({ success: false, error: 'Select a configured Enquiry Source for this company.' });
+      }
     }
 
     if (payload.projectId) {

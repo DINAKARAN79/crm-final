@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@dct-crm/db';
 import {
   crmDateRangeBounds,
+  formatCRMDateTime,
   PROSPECT_BEDROOM_OPTIONS,
   PROSPECT_BUDGET_OPTIONS,
   PROSPECT_PROPERTY_TYPE_OPTIONS,
@@ -33,6 +34,7 @@ import { validateObjectCustomFields } from '../services/customFieldValidation';
 import { tagLeadSiteVisitEvents } from '../services/leadEventTagging';
 import { ensureSiteVisitScheduleFields } from '../services/siteVisitScheduleFields';
 import { appendLeadProcessNote } from '../services/leadNotes';
+import { getTenantTimezone } from '../services/tenantTimezone';
 import {
   applySiteVisitCompletion,
   assertVisitCanBeCompleted,
@@ -178,6 +180,7 @@ router.get('/', authorize('SiteVisit', 'read'), async (req: AuthRequest, res: Re
       const range = crmDateRangeBounds(
         startDate ? String(startDate) : undefined,
         endDate ? String(endDate) : undefined,
+        await getTenantTimezone(tenantId),
       );
       if ('error' in range) {
         return res.status(400).json({ success: false, error: range.error });
@@ -464,7 +467,7 @@ router.post('/', authorize('SiteVisit', 'create'), async (req: AuthRequest, res:
         tenantId,
         leadId: data.leadId,
         userId,
-        content: `Site visit ${siteVisitStatus.toLowerCase()}: ${siteVisitNumber}\nScheduled: ${new Date(data.scheduledAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}${data.notes ? `\nNotes: ${data.notes}` : ''}`,
+        content: `Site visit ${siteVisitStatus.toLowerCase()}: ${siteVisitNumber}\nScheduled: ${formatCRMDateTime(new Date(data.scheduledAt), await getTenantTimezone(tenantId))}${data.notes ? `\nNotes: ${data.notes}` : ''}`,
       });
       return tx.siteVisit.findUniqueOrThrow({
         where: { id: siteVisit.id },
@@ -617,7 +620,7 @@ router.put('/:id', authorize('SiteVisit', 'edit'), async (req: AuthRequest, res:
         leadId: updated.leadId,
         userId,
         content: data.scheduledAt
-          ? `Site visit rescheduled: ${updated.siteVisitNumber}\nNew schedule: ${new Date(data.scheduledAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}${data.notes ? `\nNotes: ${data.notes}` : ''}`
+          ? `Site visit rescheduled: ${updated.siteVisitNumber}\nNew schedule: ${formatCRMDateTime(new Date(data.scheduledAt), await getTenantTimezone(tenantId))}${data.notes ? `\nNotes: ${data.notes}` : ''}`
           : `Site visit updated: ${updated.siteVisitNumber}${data.notes ? `\nNotes: ${data.notes}` : ''}`,
       });
       if (existing.leadId !== updated.leadId) {
@@ -728,7 +731,7 @@ router.post('/:id/complete', async (req: AuthRequest, res: Response) => {
           tenantId,
           leadId: existing.leadId,
           userId,
-          content: `Site visit completed: ${applied.siteVisit.siteVisitNumber}\nCompleted: ${completedAt.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}\nRating: ${parsed.data.rating}\nFeedback: ${parsed.data.feedback.trim()}`,
+          content: `Site visit completed: ${applied.siteVisit.siteVisitNumber}\nCompleted: ${formatCRMDateTime(completedAt, await getTenantTimezone(tenantId))}\nRating: ${parsed.data.rating}\nFeedback: ${parsed.data.feedback.trim()}`,
         });
         await tagLeadSiteVisitEvents(tx, {
           tenantId,
@@ -911,7 +914,7 @@ router.patch('/:id/complete', authorize('SiteVisit', 'edit'), async (req: AuthRe
         tenantId,
         leadId: existing.leadId,
         userId,
-        content: `Site visit completed: ${siteVisit.siteVisitNumber}\nCompleted: ${new Date(completedAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}\nCustomer feedback: ${customerFeedback.trim()}\nCompletion notes: ${completionNotes.trim()}`,
+        content: `Site visit completed: ${siteVisit.siteVisitNumber}\nCompleted: ${formatCRMDateTime(new Date(completedAt), await getTenantTimezone(tenantId))}\nCustomer feedback: ${customerFeedback.trim()}\nCompletion notes: ${completionNotes.trim()}`,
       });
 
       const salesHandoff = await assignCompletedSiteVisitToSalesInTransaction(tx, siteVisit.id, tenantId);
@@ -1199,7 +1202,7 @@ router.post('/:id/revisit', authorize('SiteVisit', 'create'), async (req: AuthRe
         tenantId,
         leadId: existing.leadId,
         userId,
-        content: `Site visit revisit scheduled: ${siteVisitNumber}\nScheduled: ${revisitScheduledAt.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}\nReason: ${reason}`,
+        content: `Site visit revisit scheduled: ${siteVisitNumber}\nScheduled: ${formatCRMDateTime(revisitScheduledAt, await getTenantTimezone(tenantId))}\nReason: ${reason}`,
       });
 
       return tx.siteVisit.findUniqueOrThrow({

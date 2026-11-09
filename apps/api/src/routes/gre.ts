@@ -9,7 +9,7 @@ import { getNextSiteVisitNumber } from '../services/leadWorkflowExtras';
 import { assignCompletedSiteVisitToSalesInTransaction } from '../services/rrQueue';
 import { coordinatesFromStoredMapUrl } from '../services/projectLocation';
 import { GRE_LOCATION_MESSAGES, readStoredCoordinate, verifyGreSubmissionLocation } from '../services/siteVisitLocation';
-import { leadStatusFromId, SITE_VISIT_TYPE_OPTIONS } from '@dct-crm/shared';
+import { crmDateRangeBounds, crmLocalDateTimeToDate, leadStatusFromId, SITE_VISIT_TYPE_OPTIONS } from '@dct-crm/shared';
 import { decorateLeadStatus, decorateLeadStatuses } from '../services/leadStatusSettings';
 import { createEnquiryInTransactionWithStatus } from '../services/enquiryService';
 import { mergeOperationalLeadCustomFields } from '../services/leadEventTagging';
@@ -19,6 +19,8 @@ import {
   normalizeLeadEmail,
   normalizeLeadPhone,
 } from '../services/leadDuplicateDetection';
+import { appendLeadProcessNote } from '../services/leadNotes';
+import { getTenantTimezone } from '../services/tenantTimezone';
 
 const router = Router();
 const publicRouter = Router();
@@ -121,8 +123,8 @@ export const submissionsQuerySchema = z.object({
   projectId: z.string().trim().min(1).max(100).optional(),
 });
 
-export function getGreLeadStatus(hasCompletedSiteVisit: boolean, existingStatus?: LeadStatus): LeadStatus {
-  return hasCompletedSiteVisit ? LeadStatus.SITE_VISIT_HAPPENED : existingStatus ?? LeadStatus.NEW;
+export function getGreLeadStatus(_hasCompletedSiteVisit: boolean, existingStatus?: LeadStatus): LeadStatus {
+  return existingStatus ?? LeadStatus.NEW;
 }
 
 export function selectScheduledVisitToComplete<T extends { id: string; scheduledAt: Date }>(
@@ -327,20 +329,19 @@ function parseDateOnly(value: string): Date | null {
   return date;
 }
 
-function parseLocalDateTime(dateValue: string, timeValue: string): Date | null {
+function parseLocalDateTime(dateValue: string, timeValue: string, timeZone?: string | null): Date | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateValue) || !/^\d{2}:\d{2}$/.test(timeValue)) return null;
   const date = parseDateOnly(dateValue);
   if (!date) return null;
   const [hours, minutes] = timeValue.split(':').map(Number);
   if (hours > 23 || minutes > 59) return null;
-  date.setHours(hours, minutes, 0, 0);
-  return date;
+  return crmLocalDateTimeToDate(dateValue, timeValue, timeZone || undefined);
 }
 
 async function getActiveForm(token: string) {
   const form = await prisma.greForm.findUnique({
     where: { publicToken: token },
-    include: { tenant: { select: { id: true, name: true, isActive: true } } },
+    include: { tenant: { select: { id: true, name: true, timezone: true, isActive: true } } },
   });
   if (!form || !form.isActive || !form.tenant.isActive) return null;
   if (form.expiresAt && form.expiresAt <= new Date()) return null;
@@ -400,6 +401,7 @@ publicRouter.get('/:token', async (req, res) => {
       data: {
         formName: form.name,
         tenantName: form.tenant.name,
+        timezone: form.tenant.timezone,
         defaultProjectId: form.defaultProjectId,
         projects,
       },
@@ -593,7 +595,7 @@ publicRouter.post('/:token/submit', async (req, res) => {
     const firstName = draft.lead.firstName?.trim() || '';
     const lastName = draft.lead.lastName?.trim() || '';
     const siteVisitAt = draft.siteVisit.required
-      ? parseLocalDateTime(draft.siteVisit.date!, draft.siteVisit.time!)
+      ? parseLocalDateTime(draft.siteVisit.date!, draft.siteVisit.time!, context.form.tenant.timezone)
       : null;
     if (!siteVisitAt || siteVisitAt > new Date()) {
       return res.status(400).json({ success: false, error: 'Site visit date and time must be valid and cannot be in the future' });
@@ -812,18 +814,11 @@ publicRouter.post('/:token/submit', async (req, res) => {
       };
 
       let lead: { id: string; leadNumber: string | null };
-      let leadStatusChanged = false;
+      const persistedLeadStatus = getGreLeadStatus(draft.siteVisit.required, existingLead?.status);
+      const leadStatusChanged = false;
       submitStage = 'saving lead';
       if (existingLead) {
-        const status = getGreLeadStatus(draft.siteVisit.required, existingLead.status);
-        leadStatusChanged = status !== existingLead.status;
-        lead = leadStatusChanged
-          ? await tx.lead.update({
-            where: { id: existingLead.id },
-            data: { status },
-            select: { id: true, leadNumber: true },
-          })
-          : { id: existingLead.id, leadNumber: null };
+        lead = { id: existingLead.id, leadNumber: null };
       } else {
         const leadSequence = await tx.sequence.upsert({
           where: { tenantId_type: { tenantId: context.form.tenantId, type: 'LEAD' } },
@@ -837,10 +832,10 @@ publicRouter.post('/:token/submit', async (req, res) => {
             leadNumber: `LN${String(leadSequence.nextValue).padStart(6, '0')}`,
             company: company?.name || [firstName, lastName].filter(Boolean).join(' '),
             source: 'WEBSITE',
-            status: getGreLeadStatus(draft.siteVisit.required),
+            status: persistedLeadStatus,
             customFields: mergeOperationalLeadCustomFields({}, {
               source: 'WEBSITE',
-              status: getGreLeadStatus(draft.siteVisit.required),
+              status: persistedLeadStatus,
               rating: null,
               description: draft.lead.comments || null,
               score: 0,
@@ -1061,13 +1056,23 @@ publicRouter.post('/:token/submit', async (req, res) => {
             referenceNumber,
             companyId: existingLead?.companyId || company?.id || null,
             siteVisitId: siteVisit?.id,
-            status: getGreLeadStatus(draft.siteVisit.required, existingLead?.status),
+            status: persistedLeadStatus,
             leadStatusChanged,
             siteVisitType: siteVisitType ?? null,
             siteVisitCategory: isRevisit ? 'REVISIT' : 'FIRST_VISIT',
             scheduledVisitCompleted: Boolean(scheduledVisitToComplete),
           },
         },
+      });
+      await appendLeadProcessNote(tx, {
+        tenantId: context.form.tenantId,
+        leadId: lead.id,
+        userId: context.form.createdById,
+        content: [
+          `GRE registration submitted: ${referenceNumber}`,
+          `Lead status: ${persistedLeadStatus}`,
+          siteVisit ? `Site visit completed: ${siteVisit.id}` : null,
+        ].filter(Boolean).join('\n'),
       });
       if (company && !existingLead) {
         await tx.auditLog.create({
@@ -1131,6 +1136,13 @@ publicRouter.post('/:token/submit', async (req, res) => {
         warning: submitted.salesHandoff.pendingReason || null,
       }
       : null;
+    const savedLead = await prisma.lead.findFirst({
+      where: { id: submitted.leadId, tenantId: context.form.tenantId },
+      select: { id: true, status: true },
+    });
+    const decoratedSavedLead = savedLead
+      ? await decorateLeadStatus(context.form.tenantId, savedLead)
+      : null;
 
     res.json({
       success: true,
@@ -1146,6 +1158,8 @@ publicRouter.post('/:token/submit', async (req, res) => {
           createdAt: submitted.siteVisit.createdAt,
         } : null,
         leadId: submitted.leadId,
+        leadStatus: decoratedSavedLead?.status ?? null,
+        leadStatusLabel: decoratedSavedLead?.statusLabel ?? null,
         leadWasExisting: submitted.leadWasExisting,
         message: GRE_LOCATION_MESSAGES.verified,
         scheduledVisitCompleted: submitted.scheduledVisitCompleted,
@@ -1325,9 +1339,16 @@ router.get('/submissions', async (req: AuthRequest, res: Response) => {
     if (from && to && from > to) {
       return res.status(400).json({ success: false, error: 'The start date must be before or equal to the end date' });
     }
-    const dateFrom = from ? new Date(`${from}T00:00:00.000Z`) : undefined;
-    const dateToExclusive = to ? new Date(`${to}T00:00:00.000Z`) : undefined;
-    if (dateToExclusive) dateToExclusive.setUTCDate(dateToExclusive.getUTCDate() + 1);
+    let dateFrom: Date | undefined;
+    let dateToExclusive: Date | undefined;
+    if (from || to) {
+      const dateRange = crmDateRangeBounds(from, to, await getTenantTimezone(req.tenantId!));
+      if ('error' in dateRange) {
+        return res.status(400).json({ success: false, error: dateRange.error });
+      }
+      dateFrom = dateRange.gte;
+      dateToExclusive = dateRange.lt;
+    }
     const phoneDigits = phone?.replace(/\D/g, '');
     const filters: Prisma.GreSessionWhereInput[] = [];
     if (phone) {

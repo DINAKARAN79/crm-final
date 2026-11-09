@@ -5,6 +5,8 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { ArrowLeft, ChevronLeft, ChevronRight, RefreshCw, Download, Save } from "lucide-react";
 import { platformReportingApi } from "@/lib/api";
+import { crmLocalDateTimeToDate } from "@dct-crm/shared";
+import { formatDateTime, getTenantTimezone } from "@/lib/date-format";
 
 type Summary = {
   id: string;
@@ -44,12 +46,20 @@ async function responseData<T>(request: Promise<{ data: Envelope<T> }>): Promise
 
 function dateParam(value: string, endOfDay = false) {
   if (!value) return undefined;
-  return new Date(`${value}T${endOfDay ? "23:59:59.999" : "00:00:00.000"}Z`).toISOString();
+  const timezone = getTenantTimezone();
+  const start = crmLocalDateTimeToDate(value, "00:00", timezone);
+  if (!endOfDay) return start.toISOString();
+  const nextDate = new Date(`${value}T00:00:00.000Z`);
+  nextDate.setUTCDate(nextDate.getUTCDate() + 1);
+  return new Date(crmLocalDateTimeToDate(nextDate.toISOString().slice(0, 10), "00:00", timezone).getTime() - 1).toISOString();
 }
 
 function formatValue(value: unknown) {
   if (value == null || value === "") return "—";
-  if (value instanceof Date) return value.toLocaleString();
+  if (value instanceof Date) return formatDateTime(value);
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}T/.test(value) && !Number.isNaN(new Date(value).getTime())) {
+    return formatDateTime(value);
+  }
   return String(value);
 }
 
@@ -246,7 +256,7 @@ export function PlatformMetricReport() {
             </button>
           </div>
         </div>
-        {summary && <p className="mt-2 text-xs text-slate-500">Last updated {new Date(summary.asOf).toLocaleString()}</p>}
+        {summary && <p className="mt-2 text-xs text-slate-500">Last updated {formatDateTime(summary.asOf)}</p>}
       </header>
 
       {error && <div role="alert" className="flex items-center justify-between gap-3 rounded-md border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">

@@ -448,6 +448,8 @@ export const impersonationApi = {
 export const leadApi = {
   list: (params?: Record<string, any>) =>
     api.get<ApiResponse>('/api/leads', { params }),
+  bookedBucketAccess: () =>
+    api.get<ApiResponse>('/api/leads/booked-bucket-access'),
   statuses: () =>
     api.get<ApiResponse>('/api/leads/statuses'),
   salesUsers: () =>
@@ -610,12 +612,20 @@ export const receiptApi = {
     api.post<ApiResponse>(`/api/receipts/lead/${leadId}`, data),
   createCustomerReceipt: (leadId: string, bookingId: string, data: Record<string, unknown>) =>
     api.post<ApiResponse>(`/api/receipts/lead/${leadId}/bookings/${bookingId}/customer-receipt`, data),
+  listRefundsForLead: (leadId: string) =>
+    api.get<ApiResponse>(`/api/receipts/lead/${leadId}/refunds`),
+  createRefundRequest: (leadId: string, data: Record<string, unknown>) =>
+    api.post<ApiResponse>(`/api/receipts/lead/${leadId}/refunds`, data),
   downloadPdf: (leadId: string, receiptId: string) =>
     api.get<Blob>(`/api/receipts/lead/${leadId}/${receiptId}/pdf`, { responseType: 'blob' }),
   listApprovals: (params?: Record<string, unknown>) =>
     api.get<ApiResponse>('/api/receipts/approvals', { params }),
   reviewApproval: (receiptId: string, data: { decision: 'APPROVE' | 'REJECT'; note?: string }) =>
     api.post<ApiResponse>(`/api/receipts/approvals/${receiptId}/review`, data),
+  listRefundApprovals: () =>
+    api.get<ApiResponse>('/api/receipts/approvals/refunds'),
+  reviewRefundApproval: (refundId: string, data: { decision: 'APPROVE' | 'REJECT'; note?: string }) =>
+    api.post<ApiResponse>(`/api/receipts/approvals/refunds/${refundId}/review`, data),
 };
 
 // Notes API resolves the record type from its tenant-scoped record ID.
@@ -779,6 +789,10 @@ export const objectDefinitionApi = {
 export const dataAdministrationApi = {
   import: (objectName: string, fields: string[], csv: string) =>
     api.post<ApiResponse>('/api/data-administration/import', { objectName, fields, csv }),
+  leadImportProfiles: () =>
+    api.get<ApiResponse>('/api/data-administration/import/lead-status-profiles'),
+  saveLeadImportProfiles: (profiles: Array<{ status: string; profileNames: string[] }>) =>
+    api.put<ApiResponse>('/api/data-administration/import/lead-status-profiles', { profiles }),
   update: (objectName: string, payload: Record<string, any>) =>
     api.post<ApiResponse>('/api/data-administration/update', { objectName, ...payload }),
   export: (objectName: string, params?: Record<string, any>) =>
@@ -853,6 +867,21 @@ export const telephonySettingsApi = {
     api.get<ApiResponse>('/api/setup/telephony/logs', { params: tenantId ? { tenantId } : undefined }),
 };
 
+export const bookedBucketSettingsApi = {
+  get: (tenantId?: string) =>
+    api.get<ApiResponse>('/api/setup/booked-bucket', { params: tenantId ? { tenantId } : undefined }),
+  update: (data: {
+    isActive: boolean;
+    fallbackUserId: string | null;
+    memberIds: string[];
+    moveOpenFollowUps: boolean;
+    returnToPreviousOwnerOnCancel: boolean;
+  }, tenantId?: string) =>
+    api.put<ApiResponse>('/api/setup/booked-bucket', data, { params: tenantId ? { tenantId } : undefined }),
+  preview: (tenantId?: string) =>
+    api.get<ApiResponse>('/api/setup/booked-bucket/preview', { params: tenantId ? { tenantId } : undefined }),
+};
+
 export const telephonyDialpadApi = {
   clientConfig: () =>
     api.get<ApiResponse>('/api/telephony/client-config'),
@@ -861,6 +890,7 @@ export const telephonyDialpadApi = {
   dialpadEvent: (data: {
     event: 'BIZCALL_AGENT_REGISTERED' | 'BIZCALL_CALL_STARTING' | 'BIZCALL_CALL_CONNECTED' | 'BIZCALL_CALL_ENDED' | 'BIZCALL_DISPOSITION_SUBMITTED';
     leadId?: string;
+    callDetailId?: string;
     callUuid?: string;
     number?: string;
     duration?: number;
@@ -913,6 +943,7 @@ export const userApi = {
   update: (
     id: string,
     data: {
+      email?: string;
       firstName?: string;
       lastName?: string;
       phone?: string;

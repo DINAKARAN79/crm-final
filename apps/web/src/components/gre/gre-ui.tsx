@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
 import { Input } from "@/components/ui/input";
+import { CurrencyInput } from "@/components/ui/currency-input";
 
 import { Label } from "@/components/ui/label";
 
@@ -17,6 +18,7 @@ import { useToast } from "@/hooks/use-toast";
 
 import { greApi, projectApi } from "@/lib/api";
 import { useAuth } from "@/contexts/auth-context";
+import { dateKey, formatDateTime, setTenantTimezone } from "@/lib/date-format";
 import { captureGreCompletionLocation, GeolocationError, getGeolocationPermission, getLocationSettingsInstructions } from "@/lib/geolocation";
 
 import { SITE_VISIT_TYPE_OPTIONS } from "@dct-crm/shared";
@@ -427,9 +429,9 @@ export function GreSetupPage() {
                   <td className="px-4 py-3"><div className="font-medium">{item.name || "—"}</div><div className="text-xs text-muted-foreground">{item.phone || "—"}</div><div className="text-xs text-muted-foreground">{item.leadNumber || ""}</div></td>
                   <td className="px-4 py-3">{item.company || "—"}</td>
                   <td className="px-4 py-3">{item.leadWasExisting ? "Existing lead" : "New lead"}</td>
-                  <td className="px-4 py-3"><div>{item.project || "—"}</div><div className="text-xs text-muted-foreground">{item.siteVisitAt ? new Date(item.siteVisitAt).toLocaleString() : "No visit"}</div></td>
+                  <td className="px-4 py-3"><div>{item.project || "—"}</div><div className="text-xs text-muted-foreground">{item.siteVisitAt ? formatDateTime(item.siteVisitAt) : "No visit"}</div></td>
                   <td className="px-4 py-3"><div>COMPLETED</div><div className="text-xs text-muted-foreground">{item.leadStatus ? item.leadStatusLabel || getLeadStatusLabel(item.leadStatus) : ""}{item.siteVisitStatus ? ` · ${siteVisitStatusLabels[item.siteVisitStatus] || item.siteVisitStatus}` : ""}</div></td>
-                  <td className="whitespace-nowrap px-4 py-3 text-xs text-muted-foreground">{new Date(item.createdAt).toLocaleString()}</td>
+                  <td className="whitespace-nowrap px-4 py-3 text-xs text-muted-foreground">{formatDateTime(item.createdAt)}</td>
                 </tr>
               ))}
               {!isLoadingSubmissions && submissions.length === 0 && <tr><td colSpan={7} className="px-4 py-10 text-center text-muted-foreground">No completed submissions match these filters.</td></tr>}
@@ -469,6 +471,7 @@ interface Project {
 interface FormMeta {
   formName: string;
   tenantName: string;
+  timezone?: string | null;
   defaultProjectId: string | null;
   projects: Project[];
 }
@@ -591,6 +594,7 @@ export function GreRegistrationPage() {
   const [referenceNumber, setReferenceNumber] = React.useState("");
   const [submittedLeadWasExisting, setSubmittedLeadWasExisting] = React.useState(false);
   const [submittedScheduledVisitWasCompleted, setSubmittedScheduledVisitWasCompleted] = React.useState(false);
+  const [submittedLeadStatus, setSubmittedLeadStatus] = React.useState("");
   const [submittedAssignment, setSubmittedAssignment] = React.useState<{ assignedTo: string | null; warning?: string | null } | null>(null);
   const [submittedSiteVisit, setSubmittedSiteVisit] = React.useState<{ projectId: string; scheduledAt: string; status: string } | null>(null);
   const [errorMessage, setErrorMessage] = React.useState("");
@@ -608,6 +612,7 @@ export function GreRegistrationPage() {
         if (!isMounted) return;
         const formMeta = response.data.data as FormMeta;
         setMeta(formMeta);
+        setTenantTimezone(formMeta.timezone);
         setDraft(draftWithLinkedProject(emptyDraft, formMeta.defaultProjectId));
         const savedToken = sessionStorage.getItem(`gre-session:${token}`);
         if (savedToken) {
@@ -738,6 +743,7 @@ export function GreRegistrationPage() {
       setReferenceNumber(response.data.data.referenceNumber);
       setSubmittedLeadWasExisting(Boolean(response.data.data.leadWasExisting));
       setSubmittedScheduledVisitWasCompleted(Boolean(response.data.data.scheduledVisitCompleted));
+      setSubmittedLeadStatus(response.data.data.leadStatusLabel || response.data.data.leadStatus || "");
       setSubmittedAssignment(response.data.data.assignment || null);
       setSubmittedSiteVisit(response.data.data.siteVisit || null);
       sessionStorage.removeItem(`gre-session:${token}`);
@@ -812,7 +818,7 @@ export function GreRegistrationPage() {
 
   if (isLoading) return <CenteredState><Loader2 className="h-6 w-6 animate-spin text-primary" /><span className="sr-only">Loading registration form</span></CenteredState>;
   if (errorMessage && !meta) return <CenteredState><StateCard><AlertCircle className="mx-auto h-8 w-8 text-destructive" /><h1 className="mt-4 text-lg font-semibold">Registration link unavailable</h1><p className="mt-2 text-sm text-muted-foreground">{errorMessage}</p></StateCard></CenteredState>;
-  if (referenceNumber) return <CenteredState><StateCard><CheckCircle2 className="mx-auto h-10 w-10 text-emerald-600" /><h1 className="mt-4 text-xl font-semibold">Site visit completed</h1><p className="mt-2 text-sm text-muted-foreground">Project location verified successfully. Site visit completed. {submittedScheduledVisitWasCompleted ? "Your scheduled Site Visit was marked completed." : submittedLeadWasExisting ? "Your existing Lead was updated and the new visit was added." : "Your Lead and Site Visit were created."} The Lead status is now Site Visit Happened.</p>{submittedAssignment?.assignedTo && <p className="mt-3 inline-flex items-center gap-2 rounded-full border border-sky-200 bg-sky-50 px-4 py-1.5 text-sm text-[#075d91]"><span className="text-[#1479a8]">Sales:</span> <span className="font-semibold">{submittedAssignment.assignedTo}</span></p>}{submittedAssignment?.warning && <p role="status" className="mt-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-left text-sm text-amber-900">{submittedAssignment.warning} Please contact the CRM team to complete the assignment.</p>}{submittedSiteVisit && <div className="mt-4 rounded-md border p-3 text-left text-sm"><p><span className="font-medium">Project:</span> {meta?.projects.find((project) => project.id === submittedSiteVisit.projectId)?.name || "Selected project"}</p><p className="mt-1"><span className="font-medium">Visit:</span> {new Date(submittedSiteVisit.scheduledAt).toLocaleString()}</p><p className="mt-1"><span className="font-medium">Status:</span> {submittedSiteVisit.status}</p></div>}<p className="mt-5 rounded-md bg-muted px-4 py-3 font-mono text-sm">{referenceNumber}</p><p className="mt-3 text-xs text-muted-foreground">Please keep this reference number for your records.</p><Button type="button" className="mt-5 w-full" onClick={registerAnotherCustomer}>Register another customer</Button></StateCard></CenteredState>;
+  if (referenceNumber) return <CenteredState><StateCard><CheckCircle2 className="mx-auto h-10 w-10 text-emerald-600" /><h1 className="mt-4 text-xl font-semibold">Site visit completed</h1><p className="mt-2 text-sm text-muted-foreground">Project location verified successfully. Site visit completed. {submittedScheduledVisitWasCompleted ? "Your scheduled Site Visit was marked completed." : submittedLeadWasExisting ? "Your existing Lead was used and the new visit was added." : "Your Lead and Site Visit were created."}{submittedLeadStatus ? ` Lead status: ${submittedLeadStatus}.` : ""}</p>{submittedAssignment?.assignedTo && <p className="mt-3 inline-flex items-center gap-2 rounded-full border border-sky-200 bg-sky-50 px-4 py-1.5 text-sm text-[#075d91]"><span className="text-[#1479a8]">Sales:</span> <span className="font-semibold">{submittedAssignment.assignedTo}</span></p>}{submittedAssignment?.warning && <p role="status" className="mt-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-left text-sm text-amber-900">{submittedAssignment.warning} Please contact the CRM team to complete the assignment.</p>}{submittedSiteVisit && <div className="mt-4 rounded-md border p-3 text-left text-sm"><p><span className="font-medium">Project:</span> {meta?.projects.find((project) => project.id === submittedSiteVisit.projectId)?.name || "Selected project"}</p><p className="mt-1"><span className="font-medium">Visit:</span> {formatDateTime(submittedSiteVisit.scheduledAt)}</p><p className="mt-1"><span className="font-medium">Status:</span> {submittedSiteVisit.status}</p></div>}<p className="mt-5 rounded-md bg-muted px-4 py-3 font-mono text-sm">{referenceNumber}</p><p className="mt-3 text-xs text-muted-foreground">Please keep this reference number for your records.</p><Button type="button" className="mt-5 w-full" onClick={registerAnotherCustomer}>Register another customer</Button></StateCard></CenteredState>;
 
   return (
     <main className="relative min-h-screen overflow-x-hidden bg-slate-100 px-3 py-4 sm:px-4 sm:py-8 lg:px-8 lg:py-10">
@@ -897,7 +903,7 @@ export function GreRegistrationPage() {
                 <h3 className="mb-2 text-[11px] font-semibold text-slate-800">Scheduled Site Visits</h3>
                 <div className="space-y-2">
                   {scheduledVisits.map((visit) => <div key={visit.id} className="rounded-md border border-amber-200 bg-amber-50/70 p-3 text-[11px] text-amber-950">
-                    <p className="font-semibold">{visit.project?.name || meta?.projects.find((project) => project.id === visit.projectId)?.name || "Project not specified"} · {new Date(visit.scheduledAt).toLocaleString()}</p>
+                    <p className="font-semibold">{visit.project?.name || meta?.projects.find((project) => project.id === visit.projectId)?.name || "Project not specified"} · {formatDateTime(visit.scheduledAt)}</p>
                     <p className="mt-1">Visit #{visit.siteVisitNumber}{visit.visitType ? ` · ${visit.visitType}` : ""}{visit.visitorCount ? ` · ${visit.visitorCount} visitor${visit.visitorCount === 1 ? "" : "s"}` : ""}</p>
                     {visit.assignee && <p className="mt-1">Assigned to: {[visit.assignee.firstName, visit.assignee.lastName].filter(Boolean).join(" ")}</p>}
                     {visit.notes && <p className="mt-1 whitespace-pre-wrap">Notes: {visit.notes}</p>}
@@ -929,7 +935,7 @@ export function GreRegistrationPage() {
                     <SectionTitle title="Professional Information" description="Occupation and customer preferences" icon={Briefcase} />
                     <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                       <Field label="Occupation"><Input maxLength={150} value={draft.lead.occupation} onChange={(event) => updateLead("occupation", event.target.value)} /></Field>
-                      <Field label="Budget"><Input type="number" min="0" step="any" value={draft.lead.budget ?? ""} onChange={(event) => updateLead("budget", event.target.value === "" ? null : Number(event.target.value))} /></Field>
+                      <Field label="Budget"><CurrencyInput min="0" step="any" value={draft.lead.budget ?? ""} onChange={(event) => updateLead("budget", event.target.value === "" ? null : Number(event.target.value))} /></Field>
                       <Field label="Preferred location"><Input maxLength={150} value={draft.lead.preferredLocation} onChange={(event) => updateLead("preferredLocation", event.target.value)} /></Field>
                       <Field label="Lead type"><select value={greLeadTypeValue(false, draft.lead.leadType)} onChange={(event) => updateLead("leadType", event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm">{GRE_LEAD_TYPE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></Field>
                     </div>
@@ -949,13 +955,13 @@ export function GreRegistrationPage() {
                   }} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm disabled:cursor-not-allowed disabled:opacity-80"><option value="">Select a project</option>{meta?.projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></Field>
                   {scheduledVisitForSelectedProject && <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs leading-relaxed text-amber-950 lg:col-span-2">
                     <p className="font-semibold">Scheduled Site Visit #{scheduledVisitForSelectedProject.siteVisitNumber}</p>
-                    <p className="mt-1">Scheduled for {new Date(scheduledVisitForSelectedProject.scheduledAt).toLocaleString()}{scheduledVisitForSelectedProject.visitType ? ` · ${scheduledVisitForSelectedProject.visitType}` : ""}</p>
+                    <p className="mt-1">Scheduled for {formatDateTime(scheduledVisitForSelectedProject.scheduledAt)}{scheduledVisitForSelectedProject.visitType ? ` · ${scheduledVisitForSelectedProject.visitType}` : ""}</p>
                     {scheduledVisitForSelectedProject.assignee && <p className="mt-1">Assigned to: {[scheduledVisitForSelectedProject.assignee.firstName, scheduledVisitForSelectedProject.assignee.lastName].filter(Boolean).join(" ")}</p>}
                     {scheduledVisitForSelectedProject.visitorCount && <p className="mt-1">Visitors: {scheduledVisitForSelectedProject.visitorCount}</p>}
                     {scheduledVisitForSelectedProject.notes && <p className="mt-1 whitespace-pre-wrap">Notes: {scheduledVisitForSelectedProject.notes}</p>}
                     <p className="mt-2">Submitting this GRE will mark that scheduled visit as completed instead of creating a duplicate.</p>
                   </div>}
-                  <Field label="Visit date" required><Input type="date" required max={new Date(Date.now() - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 10)} value={draft.siteVisit.date} onChange={(event) => updateSiteVisit("date", event.target.value)} /></Field>
+                  <Field label="Visit date" required><Input type="date" required max={dateKey(new Date())} value={draft.siteVisit.date} onChange={(event) => updateSiteVisit("date", event.target.value)} /></Field>
                   <Field label="Visit time" required><Input type="time" required value={draft.siteVisit.time} onChange={(event) => updateSiteVisit("time", event.target.value)} /></Field>
                   <Field label="Number of visitors"><Input type="number" min={1} max={50} value={draft.siteVisit.visitorCount ?? 1} onChange={(event) => updateSiteVisit("visitorCount", event.target.value === "" ? null : Number(event.target.value))} /></Field>
                   <Field label="Visit type"><select value={greVisitTypeValue(draft.siteVisit.visitType)} onChange={(event) => updateSiteVisit("visitType", event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"><option value="">Select visit type</option>{SITE_VISIT_TYPE_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}</select></Field>

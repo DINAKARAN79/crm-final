@@ -52,6 +52,22 @@ function formatNoteDate(value: string): string {
   }).format(date);
 }
 
+export function orderNoteBlocksNewestFirst(notes: string): string[] {
+  return notes
+    ? notes.split(/\n\n(?=Note \d+:)/).map((block, index) => ({ block, index, parsed: parseNoteBlock(block) }))
+      .sort((left, right) => {
+        const leftNumber = left.parsed ? Number(left.parsed.number) : null;
+        const rightNumber = right.parsed ? Number(right.parsed.number) : null;
+        if (leftNumber === null || rightNumber === null) {
+          if (leftNumber === null && rightNumber === null) return left.index - right.index;
+          return leftNumber === null ? 1 : -1;
+        }
+        return rightNumber - leftNumber || left.index - right.index;
+      })
+      .map(({ block }) => block)
+    : [];
+}
+
 export default function StickyNotesCard({ recordId, canAdd = true, openSignal = 0 }: StickyNotesCardProps) {
   const { toast } = useToast();
   const [notes, setNotes] = React.useState("");
@@ -116,7 +132,7 @@ export default function StickyNotesCard({ recordId, canAdd = true, openSignal = 
     }
   };
 
-  const noteBlocks = notes ? notes.split(/\n\n(?=Note \d+:)/) : [];
+  const noteBlocks = orderNoteBlocksNewestFirst(notes);
 
   return (
     <>

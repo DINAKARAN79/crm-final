@@ -36,6 +36,10 @@ describe('inviteUserSchema', () => {
 });
 
 describe('updateUserSchema', () => {
+  it('normalizes email addresses before persisting them', () => {
+    expect(updateUserSchema.parse({ email: '  Sam@Example.COM  ' }).email).toBe('sam@example.com');
+  });
+
   it('accepts a single-name user with a blank last name', () => {
     const result = updateUserSchema.parse({
       firstName: 'aadarsh',

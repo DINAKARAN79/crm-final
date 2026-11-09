@@ -6,12 +6,18 @@ import { bookingApi, receiptApi } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { CurrencyInput } from "@/components/ui/currency-input";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 
-type Applicant = { name?: string; salutation?: string };
+type Applicant = {
+  name?: string;
+  salutation?: string;
+  email?: string;
+  mobileNumber?: string;
+};
 
 interface ReceiptBooking {
   id: string;
@@ -51,6 +57,22 @@ interface ReceiptRecord {
   };
 }
 
+interface RefundRequestRecord {
+  id: string;
+  amount: number;
+  customerName: string;
+  customerPhone?: string | null;
+  customerEmail?: string | null;
+  reason: string;
+  refundReference: string;
+  status: "PENDING_APPROVAL" | "APPROVED" | "REJECTED";
+  submittedAt: string;
+  reviewedAt?: string | null;
+  reviewedBy?: { firstName: string; lastName: string } | null;
+  reviewNote?: string | null;
+  booking: { id: string; bookingNumber: string; project: { name: string }; unit: { number: string } };
+}
+
 type ReceiptForm = {
   bookingId: string;
   receiptDate: string;
@@ -81,10 +103,13 @@ function ReceiptField({ label, children }: { label: string; children: React.Reac
   );
 }
 
-export function LeadReceipts({ leadId }: { leadId: string }) {
+export function LeadReceipts({ leadId, bookingId }: { leadId: string; bookingId?: string }) {
   const { toast } = useToast();
   const [bookings, setBookings] = React.useState<ReceiptBooking[]>([]);
   const [receipts, setReceipts] = React.useState<ReceiptRecord[]>([]);
+  const [refunds, setRefunds] = React.useState<RefundRequestRecord[]>([]);
+  const [refundForm, setRefundForm] = React.useState({ customerName: "", customerPhone: "", customerEmail: "", amount: "", reason: "", refundReference: "" });
+  const refundRequestKey = React.useRef("");
   const [form, setForm] = React.useState<ReceiptForm>({
     bookingId: "",
     receiptDate: today(),
@@ -105,15 +130,20 @@ export function LeadReceipts({ leadId }: { leadId: string }) {
     setLoading(true);
     setLoadError("");
     try {
-      const [bookingResponse, receiptResponse] = await Promise.all([
+      const [bookingResponse, receiptResponse, refundResponse] = await Promise.all([
         bookingApi.listForLead(leadId),
         receiptApi.listForLead(leadId),
+        receiptApi.listRefundsForLead(leadId),
       ]);
       const bookingRows = (bookingResponse.data.data || []) as ReceiptBooking[];
       setBookings(bookingRows);
       setReceipts((receiptResponse.data.data || []) as ReceiptRecord[]);
+      setRefunds((refundResponse.data.data || []) as RefundRequestRecord[]);
       setForm((current) => {
-        const selected = bookingRows.find((booking) => booking.id === current.bookingId) || bookingRows.find((booking) => booking.status === "RESERVED" || booking.status === "BOOKED") || bookingRows[0];
+        const selected = bookingRows.find((booking) => booking.id === bookingId)
+          || bookingRows.find((booking) => booking.id === current.bookingId)
+          || bookingRows.find((booking) => booking.status === "RESERVED" || booking.status === "BOOKED")
+          || bookingRows[0];
         return {
           ...current,
           bookingId: selected?.id || "",
@@ -127,28 +157,46 @@ export function LeadReceipts({ leadId }: { leadId: string }) {
     } finally {
       setLoading(false);
     }
-  }, [leadId]);
+  }, [bookingId, leadId]);
 
   React.useEffect(() => {
     void loadData();
   }, [loadData]);
 
   const selectedBooking = bookings.find((booking) => booking.id === (preview?.bookingId || form.bookingId));
+  const refundEligible = selectedBooking?.status === "BOOKED" || selectedBooking?.status === "CONFIRMED";
   const selectedReceipts = receipts.filter((receipt) => receipt.booking.id === selectedBooking?.id);
   const approvedMisReceipt = selectedReceipts.some((receipt) => receipt.kind === "MIS_SUBMISSION" && receipt.approvalStatus === "APPROVED");
   const hasPendingMisReceipt = selectedReceipts.some((receipt) => receipt.kind === "MIS_SUBMISSION" && receipt.approvalStatus === "PENDING_APPROVAL");
   const approvedTotal = selectedReceipts
     .filter((receipt) => receipt.approvalStatus === "APPROVED" || receipt.approvalStatus === "ISSUED")
     .reduce((total, receipt) => total + receipt.amount, 0);
-  const remainingBalance = Math.max(0, (selectedBooking?.quotation.totalPrice || 0) - approvedTotal);
+  const selectedRefunds = refunds.filter((refund) => refund.booking.id === selectedBooking?.id);
+  const approvedRefunds = selectedRefunds
+    .filter((refund) => refund.status === "APPROVED")
+    .reduce((total, refund) => total + refund.amount, 0);
+  const reservedRefunds = selectedRefunds
+    .filter((refund) => refund.status === "APPROVED" || refund.status === "PENDING_APPROVAL")
+    .reduce((total, refund) => total + refund.amount, 0);
+  const remainingBalance = Math.max(0, (selectedBooking?.quotation.totalPrice || 0) - approvedTotal + approvedRefunds);
+  const refundableBalance = Math.max(0, approvedTotal - reservedRefunds);
+  React.useEffect(() => {
+    if (!selectedBooking) return;
+    setRefundForm((current) => ({
+      ...current,
+      customerName: current.customerName || fieldValue(selectedBooking.firstApplicant?.name),
+      customerPhone: current.customerPhone || fieldValue(selectedBooking.firstApplicant?.mobileNumber),
+      customerEmail: current.customerEmail || fieldValue(selectedBooking.firstApplicant?.email),
+    }));
+  }, [selectedBooking?.id]);
   const updateField = (name: keyof ReceiptForm, value: string) => {
     setForm((current) => ({ ...current, [name]: value }));
     setPreview(null);
   };
 
   const generatePreview = () => {
-    if (!form.bookingId || !form.receiptDate || !form.receivedDate || !form.receivedFrom.trim() || !form.amount || !form.paymentMode) {
-      toast({ title: "Complete the required fields", description: "Enter the payment details before generating the receipt.", variant: "destructive" });
+    if (!form.bookingId || !form.receiptDate || !form.receivedDate || !form.receivedFrom.trim() || !form.amount || !form.paymentMode || !form.transactionId.trim()) {
+      toast({ title: "Complete the required fields", description: "Enter the payment details and transaction ID before generating the receipt.", variant: "destructive" });
       return;
     }
     const amount = Number(form.amount);
@@ -166,7 +214,7 @@ export function LeadReceipts({ leadId }: { leadId: string }) {
       const response = await receiptApi.createForLead(leadId, {
         ...preview,
         amount: Number(preview.amount),
-        transactionId: preview.transactionId.trim() || null,
+        transactionId: preview.transactionId.trim(),
       });
       const receipt = response.data.data as ReceiptRecord;
       setReceipts((current) => [receipt, ...current]);
@@ -184,8 +232,8 @@ export function LeadReceipts({ leadId }: { leadId: string }) {
 
   const createCustomerReceipt = async () => {
     if (!selectedBooking || remainingBalance <= 0) return;
-    if (!form.receivedFrom.trim() || !form.receiptDate || !form.receivedDate || !form.paymentMode) {
-      toast({ title: "Complete the required fields", description: "Enter the customer and payment details before creating the receipt.", variant: "destructive" });
+    if (!form.receivedFrom.trim() || !form.receiptDate || !form.receivedDate || !form.paymentMode || !form.transactionId.trim()) {
+      toast({ title: "Complete the required fields", description: "Enter the customer and payment details, including the transaction ID.", variant: "destructive" });
       return;
     }
     const amount = Number(form.amount);
@@ -200,7 +248,7 @@ export function LeadReceipts({ leadId }: { leadId: string }) {
         receivedFrom: form.receivedFrom,
         amount,
         paymentMode: form.paymentMode,
-        transactionId: form.transactionId.trim() || null,
+        transactionId: form.transactionId.trim(),
         receivedDate: form.receivedDate,
       });
       const receipt = response.data.data as ReceiptRecord;
@@ -211,6 +259,41 @@ export function LeadReceipts({ leadId }: { leadId: string }) {
       console.error("Failed to create CRM customer receipt:", cause);
       const message = (cause as { response?: { data?: { error?: string } } }).response?.data?.error;
       toast({ title: "Could not create customer receipt", description: message || "Please check the details and try again.", variant: "destructive" });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const createRefundRequest = async () => {
+    if (!selectedBooking || !refundEligible || refundableBalance <= 0) return;
+    const amount = Number(refundForm.amount);
+    if (!refundForm.customerName.trim() || !refundForm.reason.trim() || !refundForm.refundReference.trim()
+      || !Number.isFinite(amount) || amount <= 0 || amount > refundableBalance + 0.005) {
+      toast({ title: "Check the refund details", description: `Enter customer name, reason, reference, and an amount up to ${currency(refundableBalance)}.`, variant: "destructive" });
+      return;
+    }
+    if (!refundRequestKey.current) refundRequestKey.current = crypto.randomUUID();
+    setSaving(true);
+    try {
+      const response = await receiptApi.createRefundRequest(leadId, {
+        bookingId: selectedBooking.id,
+        requestKey: refundRequestKey.current,
+        customerName: refundForm.customerName.trim(),
+        customerPhone: refundForm.customerPhone.trim() || null,
+        customerEmail: refundForm.customerEmail.trim() || null,
+        amount,
+        reason: refundForm.reason.trim(),
+        refundReference: refundForm.refundReference.trim(),
+      });
+      const refund = response.data.data as RefundRequestRecord;
+      setRefunds((current) => [refund, ...current.filter((item) => item.id !== refund.id)]);
+      setRefundForm({ customerName: "", customerPhone: "", customerEmail: "", amount: "", reason: "", refundReference: "" });
+      refundRequestKey.current = "";
+      toast({ title: "Refund sent to MIS", description: `${currency(refund.amount)} is pending approval. The booking remains unchanged.` });
+    } catch (cause) {
+      console.error("Failed to submit refund request:", cause);
+      const message = (cause as { response?: { data?: { error?: string } } }).response?.data?.error;
+      toast({ title: "Could not request refund", description: message || "Please check the details and try again.", variant: "destructive" });
     } finally {
       setSaving(false);
     }
@@ -261,7 +344,7 @@ export function LeadReceipts({ leadId }: { leadId: string }) {
   return (
     <div className="space-y-4">
       {errorMessage && (
-        <Card>
+        <Card id="booking-refund-requests">
           <CardContent className="flex flex-wrap items-center justify-between gap-3 py-4">
             <p className="text-sm text-rose-700">{errorMessage}</p>
             <Button type="button" variant="outline" size="sm" onClick={() => void loadData()}><RotateCw className="mr-2 h-4 w-4" />Retry</Button>
@@ -292,6 +375,7 @@ export function LeadReceipts({ leadId }: { leadId: string }) {
               <ReceiptField label="Booking">
                 <select
                   aria-label="Booking"
+                  disabled={Boolean(bookingId)}
                   className="h-9 w-full rounded-md border border-input bg-background px-3 text-[13px]"
                   value={form.bookingId}
                   onChange={(event) => {
@@ -307,9 +391,11 @@ export function LeadReceipts({ leadId }: { leadId: string }) {
 
               {selectedBooking?.status === "CONFIRMED" ? (
                 <div className="rounded-md border border-emerald-200 bg-emerald-50 p-4">
-                  <p className="text-sm font-semibold text-emerald-900">Payment complete — welcome call successful</p>
+                  <p className="text-sm font-semibold text-emerald-900">
+                    {remainingBalance > 0.005 ? "Booking remains confirmed after an approved refund" : "Payment complete — welcome call successful"}
+                  </p>
                   <p className="mt-1 text-xs text-emerald-800">
-                    Booking {selectedBooking.bookingNumber} is confirmed. The unit is marked booked.
+                    Booking {selectedBooking.bookingNumber} remains confirmed. Net paid {currency(Math.max(0, approvedTotal - approvedRefunds))}; outstanding {currency(remainingBalance)}. The unit is marked booked.
                     {selectedBooking.welcomeCallCompletedAt ? ` Completed ${displayDate(selectedBooking.welcomeCallCompletedAt)}.` : ""}
                   </p>
                 </div>
@@ -330,7 +416,7 @@ export function LeadReceipts({ leadId }: { leadId: string }) {
                           <Input value={form.receivedFrom} onChange={(event) => updateField("receivedFrom", event.target.value)} placeholder="Customer name" maxLength={200} />
                         </ReceiptField>
                         <ReceiptField label="Amount Received (INR)">
-                          <Input type="number" min="0.01" max={remainingBalance} step="0.01" value={form.amount} onChange={(event) => updateField("amount", event.target.value)} placeholder={`Up to ${currency(remainingBalance)}`} />
+                          <CurrencyInput min="0.01" max={remainingBalance} step="0.01" value={form.amount} onChange={(event) => updateField("amount", event.target.value)} placeholder={`Up to ${currency(remainingBalance)}`} />
                         </ReceiptField>
                         <ReceiptField label="Mode of Payment">
                           <select
@@ -343,7 +429,7 @@ export function LeadReceipts({ leadId }: { leadId: string }) {
                           </select>
                         </ReceiptField>
                         <ReceiptField label="Transaction ID">
-                          <Input value={form.transactionId} onChange={(event) => updateField("transactionId", event.target.value)} placeholder="Optional reference number" maxLength={120} />
+                          <Input required value={form.transactionId} onChange={(event) => updateField("transactionId", event.target.value)} placeholder="Required payment transaction ID" maxLength={120} />
                         </ReceiptField>
                         <ReceiptField label="Received Date">
                           <Input type="date" value={form.receivedDate} onChange={(event) => updateField("receivedDate", event.target.value)} />
@@ -394,7 +480,7 @@ export function LeadReceipts({ leadId }: { leadId: string }) {
                           <Input value={form.receivedFrom} onChange={(event) => updateField("receivedFrom", event.target.value)} placeholder="Customer name" maxLength={200} />
                         </ReceiptField>
                         <ReceiptField label="Amount (INR)">
-                          <Input type="number" min="0.01" step="0.01" value={form.amount} onChange={(event) => updateField("amount", event.target.value)} placeholder="Enter payment amount" />
+                          <CurrencyInput min="0.01" step="0.01" value={form.amount} onChange={(event) => updateField("amount", event.target.value)} placeholder="Enter payment amount" />
                         </ReceiptField>
                         <ReceiptField label="Mode of Payment">
                           <select
@@ -407,7 +493,7 @@ export function LeadReceipts({ leadId }: { leadId: string }) {
                           </select>
                         </ReceiptField>
                         <ReceiptField label="Transaction ID">
-                          <Input value={form.transactionId} onChange={(event) => updateField("transactionId", event.target.value)} placeholder="Optional reference number" maxLength={120} />
+                          <Input required value={form.transactionId} onChange={(event) => updateField("transactionId", event.target.value)} placeholder="Required payment transaction ID" maxLength={120} />
                         </ReceiptField>
                         <ReceiptField label="Received Date">
                           <Input type="date" value={form.receivedDate} onChange={(event) => updateField("receivedDate", event.target.value)} />
@@ -423,6 +509,73 @@ export function LeadReceipts({ leadId }: { leadId: string }) {
                 </div>
               )}
             </>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="border-b px-4 py-3">
+          <CardTitle className="flex items-center gap-2 text-base"><RotateCw className="h-4 w-4 text-rose-700" />Refund Requests</CardTitle>
+          <p className="text-xs text-slate-500">Refunds are sent to MIS for approval. Payment balances change only after approval; a refund never cancels the booking.</p>
+        </CardHeader>
+        <CardContent className="space-y-4 p-4">
+          {refundEligible ? (
+            refundableBalance > 0.005 ? (
+              <>
+                <p className="text-sm text-slate-700">Available approved paid balance: <strong>{currency(refundableBalance)}</strong></p>
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  <ReceiptField label="Customer Name">
+                    <Input required maxLength={200} value={refundForm.customerName} onChange={(event) => setRefundForm((current) => ({ ...current, customerName: event.target.value }))} placeholder="Customer name" />
+                  </ReceiptField>
+                  <ReceiptField label="Customer Phone">
+                    <Input maxLength={40} value={refundForm.customerPhone} onChange={(event) => setRefundForm((current) => ({ ...current, customerPhone: event.target.value }))} placeholder="Phone number" />
+                  </ReceiptField>
+                  <ReceiptField label="Customer Email">
+                    <Input type="email" maxLength={254} value={refundForm.customerEmail} onChange={(event) => setRefundForm((current) => ({ ...current, customerEmail: event.target.value }))} placeholder="Email address" />
+                  </ReceiptField>
+                  <ReceiptField label="Refund Amount">
+                    <CurrencyInput required min="0.01" max={refundableBalance} step="0.01" value={refundForm.amount} onChange={(event) => setRefundForm((current) => ({ ...current, amount: event.target.value }))} placeholder={`Up to ${currency(refundableBalance)}`} />
+                  </ReceiptField>
+                  <ReceiptField label="Refund Reference">
+                    <Input required maxLength={120} value={refundForm.refundReference} onChange={(event) => setRefundForm((current) => ({ ...current, refundReference: event.target.value }))} placeholder="Unique refund reference" />
+                  </ReceiptField>
+                  <ReceiptField label="Reason">
+                    <Input required maxLength={1000} value={refundForm.reason} onChange={(event) => setRefundForm((current) => ({ ...current, reason: event.target.value }))} placeholder="Reason for refund" />
+                  </ReceiptField>
+                </div>
+                <div className="flex justify-end border-t pt-3">
+                  <Button type="button" disabled={saving} onClick={() => void createRefundRequest()} className="bg-rose-700 text-white hover:bg-rose-800">
+                    {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <FileCheck2 className="mr-2 h-4 w-4" />}
+                    {saving ? "Sending…" : "Request Refund"}
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <p className="text-sm text-slate-600">No confirmed paid balance is currently available to refund.</p>
+            )
+          ) : (
+            <p className="text-sm text-slate-600">Refunds can be requested for MIS-approved bookings with approved payments.</p>
+          )}
+          {selectedRefunds.length > 0 && (
+            <div className="divide-y rounded-md border">
+              {selectedRefunds.map((refund) => (
+                <div key={refund.id} className="flex flex-wrap items-center gap-3 px-3 py-2.5">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium text-slate-800">{refund.refundReference} · {refund.customerName}</p>
+                    <p className="text-xs text-slate-500">{refund.reason} · {displayDate(refund.submittedAt)}</p>
+                    {refund.reviewedBy && (
+                      <p className="text-xs text-slate-500">
+                        Reviewed by {[refund.reviewedBy.firstName, refund.reviewedBy.lastName].filter(Boolean).join(" ")}
+                        {refund.reviewedAt ? ` · ${displayDate(refund.reviewedAt)}` : ""}
+                      </p>
+                    )}
+                    {refund.reviewNote && <p className="text-xs text-slate-500">MIS: {refund.reviewNote}</p>}
+                  </div>
+                  <span className="text-sm font-semibold">{currency(refund.amount)}</span>
+                  <Badge variant={refund.status === "APPROVED" ? "default" : refund.status === "REJECTED" ? "destructive" : "secondary"}>{refund.status.replaceAll("_", " ")}</Badge>
+                </div>
+              ))}
+            </div>
           )}
         </CardContent>
       </Card>

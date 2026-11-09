@@ -15,6 +15,8 @@ import {
   SITE_VISIT_TRANSPORT_OPTIONS,
   SITE_VISIT_TYPE_OPTIONS,
   leadStatusFromId,
+  formatCRMDateTime,
+  crmDateRangeBounds,
   type JsonValue,
 } from '@dct-crm/shared';
 import { authenticate, AuthRequest } from '../middleware/auth';
@@ -46,6 +48,7 @@ import { processLeadEnquiry, sourceEnumValue } from '../services/enquiryProcessi
 import { getLeadEnquiries } from '../services/enquiryService';
 import { mergeOperationalLeadCustomFields } from '../services/leadEventTagging';
 import { appendLeadProcessNote } from '../services/leadNotes';
+import { getTenantTimezone } from '../services/tenantTimezone';
 import { ensureProspectLeadFields, type ProspectLeadDetails } from '../services/prospectLeadFields';
 import { ensureSiteVisitScheduleFields } from '../services/siteVisitScheduleFields';
 import {
@@ -55,6 +58,7 @@ import {
   validateLeadContactInput,
 } from '../services/leadDuplicateDetection';
 import { getLeadPicklistOptions, validateLeadPicklists } from '../services/leadPicklists';
+import { moveLeadToBookedBucket } from '../services/bookedBucket';
 import { z } from 'zod';
 import { decorateLeadStatus, decorateLeads, getLeadStatusSettings, isLeadStatusEnabled } from '../services/leadStatusSettings';
 import { withImpersonatorNames } from '../services/impersonation';
@@ -344,17 +348,39 @@ router.get('/', authorize('Lead', 'read'), async (req: AuthRequest, res: Respons
   try {
     const { page = 1, limit = 20, status, source, ownerId, search, sortBy = 'createdAt', sortOrder = 'desc', from, to } = req.query;
     const skip = (Number(page) - 1) * Number(limit);
+    const bookedBucketView = req.query.bookedBucket === 'true';
 
     const where: any = {};
     if (req.impersonation || !req.user!.isSuperAdmin || typeof req.query.tenantId === 'string') {
       where.tenantId = req.tenantId!;
+    }
+    let bookedBucketOwnerIds: string[] | null = null;
+    if (bookedBucketView) {
+      if (!req.tenantId) return res.status(400).json({ success: false, error: 'A company is required to view Booked Bucket leads' });
+      const setting = await prisma.bookedBucketSetting.findUnique({
+        where: { tenantId: req.tenantId },
+        select: {
+          isActive: true,
+          members: {
+            where: { isActive: true, user: { isActive: true, tenantId: req.tenantId } },
+            select: { userId: true },
+          },
+        },
+      });
+      const isAdministrator = Boolean(req.user!.isAdmin || req.user!.isSuperAdmin);
+      const memberIds = setting?.members.map((member) => member.userId) || [];
+      const isMember = memberIds.includes(req.user!.id);
+      if (!isAdministrator && (!setting?.isActive || !isMember)) {
+        return res.status(403).json({ success: false, error: 'Booked Bucket access is required' });
+      }
+      bookedBucketOwnerIds = isAdministrator ? memberIds : [req.user!.id];
     }
     const scope = await getLeadRecordScope(req.user!);
     const scopeClause = leadScopeClause(scope);
     if (scopeClause) {
       where.AND = Array.isArray(where.AND) ? [...where.AND, scopeClause] : [scopeClause];
     }
-    if (status && status !== 'All Statuses') {
+    if (!bookedBucketView && status && status !== 'All Statuses') {
       const requestedStatus = String(status);
       const normalizedStatus = leadStatusFromId(requestedStatus) || requestedStatus;
       if (!isValidStatus(normalizedStatus)) {
@@ -363,20 +389,16 @@ router.get('/', authorize('Lead', 'read'), async (req: AuthRequest, res: Respons
       where.status = normalizedStatus;
     }
     if (source) where.source = source;
-    if (ownerId) where.ownerId = ownerId;
+    if (!bookedBucketView && ownerId) where.ownerId = ownerId;
     if (from || to) {
-      const createdAtFilter: any = {};
-      if (from) {
-        const start = new Date(`${from}T00:00:00.000Z`);
-        if (!Number.isNaN(start.getTime())) createdAtFilter.gte = start;
-      }
-      if (to) {
-        const end = new Date(`${to}T23:59:59.999Z`);
-        if (!Number.isNaN(end.getTime())) createdAtFilter.lte = end;
-      }
-      if (Object.keys(createdAtFilter).length > 0) {
-        where.createdAt = createdAtFilter;
-      }
+      const timeZone = req.tenantId ? await getTenantTimezone(req.tenantId) : undefined;
+      const createdAtFilter = crmDateRangeBounds(
+        from ? String(from) : undefined,
+        to ? String(to) : undefined,
+        timeZone,
+      );
+      if ('error' in createdAtFilter) return res.status(400).json({ success: false, error: createdAtFilter.error });
+      if (createdAtFilter.gte || createdAtFilter.lt) where.createdAt = createdAtFilter;
     }
     if (search) {
       const searchTerm = search as string;
@@ -399,15 +421,46 @@ router.get('/', authorize('Lead', 'read'), async (req: AuthRequest, res: Respons
     const viewConstraint = await listViewConstraint(req, 'LEAD');
     if (!viewConstraint.ok) return res.status(viewConstraint.status).json({ success: false, error: viewConstraint.error });
     mergeListWhere(where, viewConstraint.where);
+    if (bookedBucketView) {
+      where.status = 'BOOKED';
+      where.ownerId = { in: bookedBucketOwnerIds || [] };
+    }
 
     const sorted = listOrderBy('LEAD', sortBy, sortOrder);
     if (!sorted.ok) return res.status(400).json({ success: false, error: sorted.error });
     const [leads, total] = await Promise.all([
       prisma.lead.findMany({
         where,
-        include: {
+        select: {
+          id: true,
+          tenantId: true,
+          ownerId: true,
+          leadNumber: true,
+          firstName: true,
+          lastName: true,
+          company: true,
+          email: true,
+          phone: true,
+          countryCode: true,
+          source: true,
+          leadInterest: true,
+          status: true,
+          rating: true,
+          createdAt: true,
+          updatedAt: true,
           owner: { select: { id: true, firstName: true, lastName: true } },
           project: { select: { id: true, name: true } },
+          bookings: {
+            where: { status: { in: ['BOOKED', 'CONFIRMED'] } },
+            select: {
+              id: true,
+              ownerId: true,
+              createdAt: true,
+              owner: { select: { id: true, firstName: true, lastName: true } },
+            },
+            orderBy: { createdAt: 'asc' },
+            take: 1,
+          },
           _count: { select: { siteVisits: true, activities: true } },
         },
         skip,
@@ -430,6 +483,29 @@ router.get('/', authorize('Lead', 'read'), async (req: AuthRequest, res: Respons
   } catch (error) {
     console.error('Get leads error:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch leads' });
+  }
+});
+
+router.get('/booked-bucket-access', authorize('Lead', 'read'), async (req: AuthRequest, res: Response) => {
+  try {
+    const tenantId = req.tenantId!;
+    if (req.user!.isAdmin || req.user!.isSuperAdmin) {
+      return res.json({ success: true, data: { canView: true } });
+    }
+    const member = await prisma.bookedBucketMember.findFirst({
+      where: {
+        tenantId,
+        userId: req.user!.id,
+        isActive: true,
+        setting: { isActive: true },
+        user: { isActive: true, tenantId },
+      },
+      select: { id: true },
+    });
+    return res.json({ success: true, data: { canView: Boolean(member) } });
+  } catch (error) {
+    console.error('Failed to check Booked Bucket access:', error);
+    return res.status(500).json({ success: false, error: 'Failed to check Booked Bucket access' });
   }
 });
 
@@ -626,39 +702,66 @@ router.get('/:id', authorize('Lead', 'read'), async (req: AuthRequest, res: Resp
   try {
     await normalizeOverdueFollowUps(req.user!.tenantId);
     await normalizeOverdueSiteVisits(req.user!.tenantId);
-    const lead = await prisma.lead.findFirst({
-      where: { id: req.params.id, ...leadIdScope(req) },
-      include: {
-        owner: { select: { id: true, firstName: true, lastName: true, email: true, phone: true } },
-        creator: { select: { id: true, firstName: true, lastName: true } },
-        project: { select: { id: true, name: true } },
-        rrQueue: { select: { id: true, name: true } },
-        siteVisits: {
-          include: {
-            assignee: { select: { id: true, firstName: true, lastName: true } },
-            project: { select: { id: true, name: true } },
-          },
-          orderBy: { scheduledAt: 'desc' },
+    const include = {
+      owner: { select: { id: true, firstName: true, lastName: true, email: true, phone: true } },
+      creator: { select: { id: true, firstName: true, lastName: true } },
+      project: { select: { id: true, name: true } },
+      rrQueue: { select: { id: true, name: true } },
+      siteVisits: {
+        include: {
+          assignee: { select: { id: true, firstName: true, lastName: true } },
+          project: { select: { id: true, name: true } },
         },
-        activities: {
-          include: { user: { select: { id: true, firstName: true, lastName: true } } },
-          orderBy: { createdAt: 'desc' },
-          take: 10,
-        },
-        followUps: {
-          where: followUpOwnerClause(req.user!),
-          orderBy: { dueDate: 'asc' },
-          take: 10,
-        },
-        auditLogs: {
-          orderBy: { createdAt: 'desc' },
-          take: 20,
-          include: {
-            user: { select: { id: true, firstName: true, lastName: true, email: true } },
-          },
+        orderBy: { scheduledAt: 'desc' as const },
+      },
+      activities: {
+        include: { user: { select: { id: true, firstName: true, lastName: true } } },
+        orderBy: { createdAt: 'desc' as const },
+        take: 10,
+      },
+      followUps: {
+        where: followUpOwnerClause(req.user!),
+        orderBy: { dueDate: 'asc' as const },
+        take: 10,
+      },
+      auditLogs: {
+        orderBy: { createdAt: 'desc' as const },
+        take: 20,
+        include: {
+          user: { select: { id: true, firstName: true, lastName: true, email: true } },
         },
       },
+    };
+    const scope = leadIdScope(req);
+    let lead = await prisma.lead.findFirst({
+      where: { id: req.params.id, ...scope },
+      include,
     });
+
+    if (!lead && scope.tenantId) {
+      lead = await prisma.lead.findFirst({
+        where: { leadNumber: req.params.id, ...scope },
+        include,
+      });
+    } else if (!lead && req.user!.isSuperAdmin && !req.impersonation) {
+      const matches = await prisma.lead.findMany({
+        where: { leadNumber: req.params.id },
+        select: { id: true },
+        take: 2,
+      });
+      if (matches.length > 1) {
+        return res.status(409).json({
+          success: false,
+          error: 'Select a company to open this lead by Lead Number.',
+        });
+      }
+      if (matches.length === 1) {
+        lead = await prisma.lead.findFirst({
+          where: { id: matches[0].id },
+          include,
+        });
+      }
+    }
 
     if (!lead) {
       return res.status(404).json({ success: false, error: 'Lead not found' });
@@ -1135,6 +1238,19 @@ router.put('/:id', authorize('Lead', 'edit'), async (req: AuthRequest, res: Resp
       return res.status(403).json({ success: false, error: 'You do not have access to this lead' });
     }
 
+    const requestedOwnerId = req.body && typeof req.body === 'object'
+      ? (req.body as Record<string, unknown>).ownerId
+      : undefined;
+    if (
+      requestedOwnerId !== undefined &&
+      normalizeDiffValue(requestedOwnerId) !== normalizeDiffValue(existingLead.ownerId)
+    ) {
+      return res.status(403).json({
+        success: false,
+        error: 'Use the lead assignment action to change the owner.',
+      });
+    }
+
     const bodyData = { ...req.body };
     const requestedCustomFields = bodyData.customFields && typeof bodyData.customFields === 'object' && !Array.isArray(bodyData.customFields)
       ? bodyData.customFields as Record<string, unknown>
@@ -1268,6 +1384,7 @@ router.put('/:id', authorize('Lead', 'edit'), async (req: AuthRequest, res: Resp
       'ownerId' in updateData &&
       normalizeDiffValue(updateData.ownerId) !== normalizeDiffValue(existingLead.ownerId);
     const shouldReassign = hasLeadAssignmentRelevantChanges(updateData);
+    const bookedStatusTransition = updateData.status === 'BOOKED' && existingLead.status !== 'BOOKED';
     const result = await prisma.$transaction(async (tx) => {
       let assignment: Awaited<ReturnType<typeof assignLeadToProjectRoundRobinInTransaction>> | null = null;
       let salesHandoff: Awaited<ReturnType<typeof assignCompletedSiteVisitToSalesInTransaction>> | null = null;
@@ -1306,8 +1423,11 @@ router.put('/:id', authorize('Lead', 'edit'), async (req: AuthRequest, res: Resp
           project: { select: { id: true, name: true } },
         },
       });
+      const bucketAssignment = bookedStatusTransition
+        ? await moveLeadToBookedBucket(lead.id, 'api', tx, req.user!.id)
+        : null;
 
-      const workflowAssigned = !!assignment || !!salesHandoff?.assignedUserId;
+      const workflowAssigned = !!assignment || !!salesHandoff?.assignedUserId || bookedStatusTransition;
       const auditNewValues = reason ? { ...newValues, reason } : newValues;
       const auditData = {
         tenantId: existingLead.tenantId,
@@ -1397,7 +1517,16 @@ router.put('/:id', authorize('Lead', 'edit'), async (req: AuthRequest, res: Resp
         }
       }
 
-      return { ...lead, assignment: rrAssignment };
+      const responseLead = bucketAssignment?.moved
+        ? await tx.lead.findFirst({
+            where: { id: lead.id, tenantId: existingLead.tenantId },
+            include: {
+              owner: { select: { id: true, firstName: true, lastName: true } },
+              project: { select: { id: true, name: true } },
+            },
+          })
+        : lead;
+      return { ...responseLead, assignment: rrAssignment, bookedBucketAssignment: bucketAssignment };
     });
 
     res.json({ success: true, data: result });
@@ -1869,7 +1998,7 @@ router.post('/:id/schedule-site-visit', authorize('Lead', 'edit'), async (req: A
         userId: req.user!.id,
         content: [
           `Site visit scheduled: ${siteVisitNumber}`,
-          `Scheduled: ${scheduledDate.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`,
+          `Scheduled: ${formatCRMDateTime(scheduledDate, await getTenantTimezone(lead.tenantId))}`,
           notes ? `Notes: ${notes}` : null,
           callSummaryRemarks ? `Call summary: ${callSummaryRemarks}` : null,
         ].filter(Boolean).join('\n'),

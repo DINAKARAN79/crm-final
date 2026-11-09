@@ -3,6 +3,7 @@
 
 import * as React from "react";
 import { Input } from "@/components/ui/input";
+import { CurrencyInput } from "@/components/ui/currency-input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -17,7 +18,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { X, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { formatCRMDate, formatCRMDateTime } from "@dct-crm/shared";
+import { formatDate as formatTenantDate, formatDateTime as formatTenantDateTime } from "@/lib/date-format";
 import {
   Popover,
   PopoverContent,
@@ -77,7 +78,7 @@ function formatCurrency(value: number): string {
 function formatDate(dateStr: string): string {
   if (!dateStr) return "";
   try {
-    return formatCRMDate(dateStr);
+    return formatTenantDate(dateStr);
   } catch {
     return dateStr;
   }
@@ -86,7 +87,7 @@ function formatDate(dateStr: string): string {
 function formatDateTime(dateStr: string): string {
   if (!dateStr) return "";
   try {
-    return formatCRMDateTime(dateStr);
+    return formatTenantDateTime(dateStr);
   } catch {
     return dateStr;
   }
@@ -340,8 +341,17 @@ export function FieldRenderer({
           />
         );
 
-      case "decimal":
       case "currency":
+        return (
+          <CurrencyInput
+            step="0.01"
+            value={value ?? ""}
+            onChange={(e) => onChange(e.target.value ? Number(e.target.value) : null)}
+            disabled={isDisabled}
+          />
+        );
+
+      case "decimal":
       case "percentage":
         return (
           <Input

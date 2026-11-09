@@ -8,6 +8,7 @@ import { Building2, ChevronDown, Loader2, Pencil, Search, UserRound, X } from "l
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { CurrencyInput } from "@/components/ui/currency-input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
@@ -23,7 +24,7 @@ import { formatDateTime } from "@/lib/date-format";
 import { notifyUnitInventoryUpdated } from "@/lib/unit-inventory-events";
 import { UNIT_PROPERTY_TYPES } from "@dct-crm/shared";
 
-const STATUSES = ["AVAILABLE", "HOLD", "RESERVED", "BOOKED", "SOLD", "BLOCKED"] as const;
+const STATUSES = ["AVAILABLE", "RESERVED", "BOOKED"] as const;
 
 type NamedPerson = { id: string; firstName?: string | null; lastName?: string | null } | null;
 type NamedLead = {
@@ -414,7 +415,7 @@ export default function UnitEditPage() {
         number: form.number.trim(),
         type: form.type,
         block: form.block.trim(),
-        status: form.status,
+        ...(STATUSES.includes(form.status as (typeof STATUSES)[number]) ? { status: form.status } : {}),
         projectId: form.projectId,
         floor,
         buildupArea,
@@ -495,6 +496,7 @@ export default function UnitEditPage() {
 
   const typeOptions = Array.from(new Set([...UNIT_PROPERTY_TYPES, form.type].filter(Boolean)));
   const statusOptions = Array.from(new Set([...STATUSES, form.status].filter(Boolean)));
+  const hasHistoricalStatus = !STATUSES.includes(form.status as (typeof STATUSES)[number]);
   const receipts = unit.bookings.flatMap((booking) =>
     (booking.receipts || []).map((receipt) => ({ ...receipt, bookingId: booking.id, bookingNumber: booking.bookingNumber })),
   );
@@ -654,7 +656,7 @@ export default function UnitEditPage() {
                 <DetailCell label="Status" onEdit={pencil?.("unit-status")}>
                   {editing ? (
                     <select id="unit-status" className={inputClass} value={form.status} onChange={(event) => update("status", event.target.value)}>
-                      {statusOptions.map((status) => <option key={status} value={status}>{status}</option>)}
+                      {statusOptions.map((status) => <option key={status} value={status} disabled={hasHistoricalStatus && status === form.status}>{status}{hasHistoricalStatus && status === form.status ? " (historical)" : ""}</option>)}
                     </select>
                   ) : form.status}
                 </DetailCell>
@@ -759,10 +761,10 @@ export default function UnitEditPage() {
                   {editing ? <Input id="unit-non-plc" className={inputClass} maxLength={255} value={form.nonPlc} onChange={(event) => update("nonPlc", event.target.value)} /> : form.nonPlc}
                 </DetailCell>
                 <DetailCell label="Base Price" onEdit={pencil?.("unit-price")}>
-                  {editing ? <Input id="unit-price" className={inputClass} inputMode="decimal" value={form.price} onChange={(event) => update("price", event.target.value)} /> : form.price}
+                  {editing ? <CurrencyInput id="unit-price" className={inputClass} step="any" value={form.price} onChange={(event) => update("price", event.target.value)} /> : form.price}
                 </DetailCell>
                 <DetailCell label="Minimum Booking Amount" onEdit={pencil?.("unit-minimum-booking")}>
-                  {editing ? <Input id="unit-minimum-booking" className={inputClass} inputMode="numeric" value={form.minimumBookingAmount} onChange={(event) => update("minimumBookingAmount", event.target.value)} /> : form.minimumBookingAmount}
+                  {editing ? <CurrencyInput id="unit-minimum-booking" className={inputClass} step="1" value={form.minimumBookingAmount} onChange={(event) => update("minimumBookingAmount", event.target.value)} /> : form.minimumBookingAmount}
                 </DetailCell>
               </div>
             </div>

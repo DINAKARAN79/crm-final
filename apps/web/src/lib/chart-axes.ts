@@ -1,3 +1,5 @@
+import { getTenantTimezone } from "@/lib/date-format";
+
 export type AxisFieldType = "string" | "number" | "date" | "enum";
 
 export type AxisField = {
@@ -292,12 +294,12 @@ function resolveKey(keys: string[], requested: unknown) {
   return keys.find((key) => key.toLowerCase() === normalized);
 }
 
-function kolkataParts(value: unknown) {
+function tenantDateParts(value: unknown) {
   const date = value instanceof Date ? value : new Date(String(value));
   if (Number.isNaN(date.getTime())) return null;
   const parts = Object.fromEntries(
     new Intl.DateTimeFormat("en-CA", {
-      timeZone: "Asia/Kolkata",
+      timeZone: getTenantTimezone(),
       year: "numeric",
       month: "2-digit",
       day: "2-digit",
@@ -314,7 +316,7 @@ function kolkataParts(value: unknown) {
 
 export function bucketDate(value: unknown, grouping: DateGrouping) {
   if (value == null || value === "") return "(Blank)";
-  const parts = kolkataParts(value);
+  const parts = tenantDateParts(value);
   if (!parts) return String(value);
   const { year, month, day } = parts;
   if (grouping === "year") return String(year);

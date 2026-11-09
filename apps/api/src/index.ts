@@ -61,6 +61,7 @@ import listViewRouter from './routes/listViews';
 import setupUsersRouter from './routes/setup/users';
 import setupCompanySettingsRouter from './routes/setup/company-settings';
 import setupLeadStatusesRouter from './routes/setup/lead-statuses';
+import setupBookedBucketRouter from './routes/setup/booked-bucket';
 import setupPersonalSettingsRouter from './routes/setup/personal-settings';
 import profileSecurityRouter from './routes/profileSecurity';
 import rrQueueRouter from './routes/rrQueues';
@@ -137,6 +138,7 @@ export const createApp = () => {
   app.use('/api/setup/users', setupUsersRouter);
   app.use('/api/setup/company-settings', setupCompanySettingsRouter);
   app.use('/api/setup/lead-statuses', setupLeadStatusesRouter);
+  app.use('/api/setup/booked-bucket', setupBookedBucketRouter);
   app.use('/api/setup/personal-settings', setupPersonalSettingsRouter);
   app.use('/api/roles', roleRouter);
   app.use('/api/profiles', profileRouter);

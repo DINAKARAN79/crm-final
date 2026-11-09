@@ -20,7 +20,7 @@ const customFieldsSchema = z.record(
 const optionalText = (max: number) => z.union([z.string().max(max), z.literal(''), z.null()]).optional();
 const optionalId = z.union([z.string().min(1), z.literal(''), z.null()]).optional();
 const optionalWholeNumber = z.union([z.number().int().min(0), z.null()]).optional();
-const inventoryStatuses = ['AVAILABLE', 'RESERVED', 'BOOKED', 'HOLD', 'SOLD', 'BLOCKED'] as const;
+const selectableUnitStatuses = ['AVAILABLE', 'RESERVED', 'BOOKED'] as const;
 
 const recordFields = {
   allowedDiscount: optionalText(25),
@@ -47,7 +47,7 @@ export const unitSchema = z.object({
   bedrooms: z.number().int().min(0).optional(),
   bathrooms: z.number().int().min(0).optional(),
   price: z.number().min(0),
-  status: z.enum(['AVAILABLE', 'HOLD', 'SOLD', 'BLOCKED']).optional(),
+  status: z.enum(selectableUnitStatuses).optional(),
   description: z.string().max(2000).optional(),
   features: z.array(z.string()).optional(),
   tags: z.array(z.string()).optional(),
@@ -57,7 +57,7 @@ export const unitSchema = z.object({
 
 export const updateUnitSchema = unitSchema.partial().extend({
   type: z.union([z.string().min(1).max(50), z.literal('')]).optional(),
-  status: z.enum(inventoryStatuses).optional(),
+  status: z.enum(selectableUnitStatuses).optional(),
   floor: z.union([z.number().int().min(0), z.null()]).optional(),
   area: z.union([z.number().min(0), z.null()]).optional(),
   price: z.union([z.number().min(0), z.null()]).optional(),
@@ -65,6 +65,10 @@ export const updateUnitSchema = unitSchema.partial().extend({
 
 const userNameSelect = { select: { id: true, firstName: true, lastName: true } } as const;
 const leadNameSelect = { select: { id: true, leadNumber: true, firstName: true, lastName: true, source: true } } as const;
+const unitStatusSchema = z.object({
+  status: z.enum(selectableUnitStatuses),
+  reason: z.string().trim().max(1000).optional(),
+});
 
 const unitDetailInclude = {
   project: { select: { id: true, name: true, address: true } },
@@ -507,6 +511,13 @@ router.put('/:id', authenticate, authorize('Unit', 'edit'), async (req: AuthRequ
       ? existing.customFields as Record<string, unknown>
       : {};
     const unit = await prisma.$transaction(async (tx) => {
+      if (data.status !== undefined && data.status !== existing.status) {
+        const activeBooking = await tx.booking.findFirst({
+          where: { tenantId, unitId: id, status: { not: 'CANCELLED' } },
+          select: { id: true },
+        });
+        if (activeBooking) throw new Error('UNIT_HAS_ACTIVE_BOOKING');
+      }
       const updated = await tx.unit.update({
         where: { id },
         data: {
@@ -574,7 +585,7 @@ router.put('/:id', authenticate, authorize('Unit', 'edit'), async (req: AuthRequ
         await tx.project.update({ where: { id: data.projectId }, data: { totalUnits: { increment: 1 } } });
       }
       return updated;
-    });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 
     await auditLog(tenantId, userId, 'UPDATE', 'Unit', id, null, data);
 
@@ -582,6 +593,12 @@ router.put('/:id', authenticate, authorize('Unit', 'edit'), async (req: AuthRequ
   } catch (error) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ success: false, error: 'Validation failed', details: error.errors });
+    }
+    if (error instanceof Error && error.message === 'UNIT_HAS_ACTIVE_BOOKING') {
+      return res.status(409).json({ success: false, error: 'Unit status is controlled by its active booking' });
+    }
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
+      return res.status(409).json({ success: false, error: 'Unit inventory changed. Refresh and try again.' });
     }
     res.status(500).json({ success: false, error: 'Failed to update unit' });
   }
@@ -591,30 +608,39 @@ router.patch('/:id/status', authenticate, authorize('Unit', 'edit'), async (req:
   try {
     const { tenantId, id: userId } = req.user!;
     const { id } = req.params;
-    const { status, reason } = req.body;
+    const { status, reason } = unitStatusSchema.parse(req.body);
 
     const existing = await prisma.unit.findFirst({ where: { id, tenantId } });
     if (!existing) {
       return res.status(404).json({ success: false, error: 'Unit not found' });
     }
 
-    const [unit] = await prisma.$transaction([
-      prisma.unit.update({
-        where: { id },
-        data: { status, updatedAt: new Date() },
-      }),
-      prisma.project.update({
-        where: { id: existing.projectId },
-        data: { 
-          updatedAt: new Date(),
-        },
-      }),
-    ]);
+    const unit = await prisma.$transaction(async (tx) => {
+      if (status !== existing.status) {
+        const activeBooking = await tx.booking.findFirst({
+          where: { tenantId, unitId: id, status: { not: 'CANCELLED' } },
+          select: { id: true },
+        });
+        if (activeBooking) throw new Error('UNIT_HAS_ACTIVE_BOOKING');
+      }
+      const updated = await tx.unit.update({ where: { id }, data: { status, updatedAt: new Date() } });
+      await tx.project.update({ where: { id: existing.projectId }, data: { updatedAt: new Date() } });
+      return updated;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 
     await auditLog(tenantId, userId, 'UPDATE', 'Unit', id, null, { status, previousStatus: existing.status, reason });
 
     res.json({ success: true, data: unit });
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ success: false, error: 'Invalid unit status', details: error.errors });
+    }
+    if (error instanceof Error && error.message === 'UNIT_HAS_ACTIVE_BOOKING') {
+      return res.status(409).json({ success: false, error: 'Unit status is controlled by its active booking' });
+    }
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
+      return res.status(409).json({ success: false, error: 'Unit inventory changed. Refresh and try again.' });
+    }
     res.status(500).json({ success: false, error: 'Failed to update unit status' });
   }
 });

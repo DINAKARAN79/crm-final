@@ -8,15 +8,25 @@ const database = vi.hoisted(() => ({
   receiptFindMany: vi.fn(),
   receiptFindManyForBooking: vi.fn(),
   receiptFindFirst: vi.fn(),
+  receiptFindTransaction: vi.fn(),
   receiptFindStage: vi.fn(),
   receiptAggregate: vi.fn(),
   receiptCreate: vi.fn(),
+  refundRequestFindMany: vi.fn(),
+  refundRequestFindIdempotency: vi.fn(),
+  refundRequestFindReference: vi.fn(),
+  refundRequestFindForReview: vi.fn(),
+  refundRequestAggregate: vi.fn(),
+  refundRequestCreate: vi.fn(),
+  refundRequestUpdateMany: vi.fn(),
   bookingFindFirst: vi.fn(),
   sequenceUpsert: vi.fn(),
   transaction: vi.fn(),
   receiptUpdateMany: vi.fn(),
   bookingUpdateMany: vi.fn(),
   unitUpdateMany: vi.fn(),
+  moveLeadToBookedBucket: vi.fn(),
+  tenantFindFirst: vi.fn(),
   reviewer: { profileName: 'MIS' },
 }));
 
@@ -26,6 +36,10 @@ vi.mock('@dct-crm/db', () => ({
     receipt: {
       findMany: database.receiptFindMany,
       findFirst: database.receiptFindFirst,
+    },
+    tenant: { findFirst: database.tenantFindFirst },
+    refundRequest: {
+      findMany: database.refundRequestFindMany,
     },
     $transaction: database.transaction,
   },
@@ -51,6 +65,9 @@ vi.mock('../services/rrQueue', () => ({
     queueId: 'crm-queue',
     memberId: 'crm-member',
   })),
+}));
+vi.mock('../services/bookedBucket', () => ({
+  moveLeadToBookedBucket: database.moveLeadToBookedBucket,
 }));
 
 import receiptsRouter from './receipts';
@@ -140,6 +157,38 @@ async function requestCustomerReceipt(inputValue: unknown = {
   });
 }
 
+async function requestRefund(inputValue: unknown = {
+  bookingId: 'booking-a',
+  requestKey: 'refund-request-1',
+  customerName: 'Asha Sharma',
+  customerPhone: '9876543210',
+  amount: 25000,
+  reason: 'Customer request',
+  refundReference: 'RF-1001',
+}) {
+  const server = createApp().listen(0);
+  servers.push(server);
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Expected a TCP server address');
+  return fetch(`http://127.0.0.1:${address.port}/api/receipts/lead/lead-a/refunds`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(inputValue),
+  });
+}
+
+async function reviewRefund(refundId: string, body: unknown) {
+  const server = createApp().listen(0);
+  servers.push(server);
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Expected a TCP server address');
+  return fetch(`http://127.0.0.1:${address.port}/api/receipts/approvals/refunds/${refundId}/review`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
 async function requestPdf() {
   const server = createApp().listen(0);
   servers.push(server);
@@ -152,8 +201,10 @@ describe('receipts API', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     database.leadFindFirst.mockResolvedValue(lead);
+    database.tenantFindFirst.mockResolvedValue(null);
     database.bookingFindFirst.mockResolvedValue(booking);
     database.receiptFindStage.mockResolvedValue(null);
+    database.receiptFindTransaction.mockResolvedValue(null);
     database.receiptAggregate.mockResolvedValue({ _sum: { amount: 50000 } });
     database.receiptFindManyForBooking.mockResolvedValue([{
       amount: 50000,
@@ -174,6 +225,31 @@ describe('receipts API', () => {
       createdBy: { id: 'sales-a', firstName: 'Sales', lastName: 'Person' },
       include,
     }));
+    database.refundRequestFindIdempotency.mockResolvedValue(null);
+    database.refundRequestFindReference.mockResolvedValue(null);
+    database.refundRequestFindForReview.mockResolvedValue({
+      id: 'refund-a',
+      tenantId: 'tenant-a',
+      bookingId: 'booking-a',
+      amount: 25000,
+      refundReference: 'RF-1001',
+      status: 'PENDING_APPROVAL',
+    });
+    database.refundRequestAggregate.mockResolvedValue({ _sum: { amount: 0 } });
+    database.refundRequestUpdateMany.mockImplementation(async ({ data }) => {
+      const current = await database.refundRequestFindForReview();
+      database.refundRequestFindForReview.mockResolvedValue({ ...current, ...data });
+      return { count: 1 };
+    });
+    database.refundRequestCreate.mockImplementation(async ({ data, include }) => ({
+      id: 'refund-a',
+      ...data,
+      submittedAt: new Date('2026-10-15T12:00:00.000Z'),
+      booking: { id: 'booking-a', bookingNumber: 'BK-2026-000001', project: { name: 'DCT Valley' }, unit: { number: 'A-101' } },
+      lead: { id: 'lead-a', leadNumber: 'LD-1', firstName: 'Asha', lastName: 'Sharma', mobile: '9876543210', email: null },
+      createdBy: { id: 'sales-a', firstName: 'Sales', lastName: 'Person' },
+      include,
+    }));
     database.receiptFindFirst.mockResolvedValue({
       id: 'receipt-a',
       receiptNumber: 'RC-2026-000001',
@@ -190,15 +266,28 @@ describe('receipts API', () => {
     database.receiptUpdateMany.mockResolvedValue({ count: 1 });
     database.bookingUpdateMany.mockResolvedValue({ count: 1 });
     database.unitUpdateMany.mockResolvedValue({ count: 1 });
+    database.moveLeadToBookedBucket.mockResolvedValue({ moved: false, owner: null, usedFallback: false });
     database.transaction.mockImplementation(async (callback) => callback({
       receipt: {
         aggregate: database.receiptAggregate,
         create: database.receiptCreate,
         findMany: database.receiptFindManyForBooking,
-        findFirst: vi.fn((args) => args.where?.kind === 'MIS_SUBMISSION'
-          ? database.receiptFindStage(args)
-          : database.receiptFindFirst(args)),
+        findFirst: vi.fn((args) => args.where?.transactionId
+          ? database.receiptFindTransaction(args)
+          : args.where?.kind === 'MIS_SUBMISSION'
+            ? database.receiptFindStage(args)
+            : database.receiptFindFirst(args)),
         updateMany: database.receiptUpdateMany,
+      },
+      refundRequest: {
+        findFirst: vi.fn((args) => args.where?.requestKey
+          ? database.refundRequestFindIdempotency(args)
+          : args.where?.refundReference
+            ? database.refundRequestFindReference(args)
+            : database.refundRequestFindForReview(args)),
+        aggregate: database.refundRequestAggregate,
+        create: database.refundRequestCreate,
+        updateMany: database.refundRequestUpdateMany,
       },
       unit: { updateMany: database.unitUpdateMany },
       booking: {
@@ -231,6 +320,121 @@ describe('receipts API', () => {
     }));
   });
 
+  it('requires a transaction ID for receipts', async () => {
+    const response = await requestReceipt({ ...input, transactionId: '' });
+    expect(response.status).toBe(400);
+    expect(database.receiptCreate).not.toHaveBeenCalled();
+  });
+
+  it('blocks duplicate transaction IDs within the tenant', async () => {
+    database.receiptFindTransaction.mockResolvedValue({ id: 'existing-receipt' });
+    const response = await requestReceipt();
+    const body = await response.json() as { field: string; error: string };
+    expect(response.status).toBe(409);
+    expect(body.field).toBe('transactionId');
+    expect(database.receiptFindTransaction).toHaveBeenCalledWith(expect.objectContaining({
+      where: { tenantId: 'tenant-a', transactionId: input.transactionId },
+    }));
+    expect(database.receiptCreate).not.toHaveBeenCalled();
+  });
+
+  it('uses case-sensitive transaction ID uniqueness', async () => {
+    const response = await requestReceipt({ ...input, transactionId: 'txn-123' });
+
+    expect(response.status).toBe(201);
+    expect(database.receiptFindTransaction).toHaveBeenCalledWith(expect.objectContaining({
+      where: { tenantId: 'tenant-a', transactionId: 'txn-123' },
+    }));
+  });
+
+  it('creates an idempotent refund request only against confirmed approved payments', async () => {
+    database.bookingFindFirst.mockResolvedValue({ ...booking, status: 'CONFIRMED' });
+    const response = await requestRefund();
+    const body = await response.json() as { data: { status: string; amount: number } };
+
+    expect(response.status).toBe(201);
+    expect(body.data).toMatchObject({ status: 'PENDING_APPROVAL', amount: 25000 });
+    expect(database.refundRequestCreate).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        tenantId: 'tenant-a',
+        bookingId: 'booking-a',
+        requestKey: 'refund-request-1',
+        amount: 25000,
+        refundReference: 'RF-1001',
+        status: 'PENDING_APPROVAL',
+      }),
+    }));
+    expect(database.refundRequestAggregate).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        tenantId: 'tenant-a',
+        bookingId: 'booking-a',
+        status: { in: ['PENDING_APPROVAL', 'APPROVED'] },
+      }),
+    }));
+  });
+
+  it('rejects refund amounts above the remaining paid balance', async () => {
+    database.bookingFindFirst.mockResolvedValue({ ...booking, status: 'CONFIRMED' });
+    const response = await requestRefund({
+      bookingId: 'booking-a',
+      requestKey: 'refund-request-2',
+      customerName: 'Asha Sharma',
+      amount: 50001,
+      reason: 'Customer request',
+      refundReference: 'RF-1002',
+    });
+    expect(response.status).toBe(409);
+    expect(database.refundRequestCreate).not.toHaveBeenCalled();
+  });
+
+  it('allows refund requests for a MIS-approved booked booking with an eligible paid balance', async () => {
+    database.bookingFindFirst.mockResolvedValue({ ...booking, status: 'BOOKED' });
+    const response = await requestRefund({
+      bookingId: 'booking-a',
+      requestKey: 'refund-request-booked',
+      customerName: 'Asha Sharma',
+      amount: 25000,
+      reason: 'Customer request',
+      refundReference: 'RF-BOOKED-1',
+    });
+
+    expect(response.status).toBe(201);
+    expect(database.refundRequestCreate).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ bookingId: 'booking-a', amount: 25000, status: 'PENDING_APPROVAL' }),
+    }));
+  });
+
+  it('blocks duplicate refund references within the tenant', async () => {
+    database.bookingFindFirst.mockResolvedValue({ ...booking, status: 'CONFIRMED' });
+    database.refundRequestFindReference.mockResolvedValue({ id: 'existing-refund' });
+    const response = await requestRefund({
+      bookingId: 'booking-a',
+      requestKey: 'refund-request-3',
+      customerName: 'Asha Sharma',
+      amount: 1000,
+      reason: 'Customer request',
+      refundReference: 'RF-1001',
+    });
+    const body = await response.json() as { field: string };
+    expect(response.status).toBe(409);
+    expect(body.field).toBe('refundReference');
+    expect(database.refundRequestCreate).not.toHaveBeenCalled();
+  });
+
+  it('lets MIS approve a refund without changing the booking', async () => {
+    const response = await reviewRefund('refund-a', { decision: 'APPROVE', note: 'Verified' });
+    const body = await response.json() as { data: { status: string } };
+
+    expect(response.status).toBe(200);
+    expect(body.data.status).toBe('APPROVED');
+    expect(database.refundRequestUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'refund-a', tenantId: 'tenant-a', status: 'PENDING_APPROVAL' },
+      data: expect.objectContaining({ status: 'APPROVED', reviewedById: 'sales-a', reviewNote: 'Verified' }),
+    }));
+    expect(database.bookingUpdateMany).not.toHaveBeenCalled();
+    expect(database.unitUpdateMany).not.toHaveBeenCalled();
+  });
+
   it('rejects a payment that exceeds the remaining quotation balance', async () => {
     const response = await requestReceipt({ ...input, amount: 50001 });
     expect(response.status).toBe(409);
@@ -241,7 +445,7 @@ describe('receipts API', () => {
 
   it('creates a CRM customer receipt for exactly the MIS-approved remaining balance', async () => {
     database.receiptFindStage.mockResolvedValue({ id: 'initial-receipt' });
-    const response = await requestCustomerReceipt({ receiptDate: '2026-10-15', receivedFrom: 'Asha Sharma', amount: 50000, paymentMode: 'UPI', receivedDate: '2026-10-15' });
+    const response = await requestCustomerReceipt({ receiptDate: '2026-10-15', receivedFrom: 'Asha Sharma', amount: 50000, paymentMode: 'UPI', transactionId: 'TXN-CUSTOMER-1', receivedDate: '2026-10-15' });
     expect(response.status).toBe(201);
     expect(database.receiptCreate).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
@@ -256,9 +460,26 @@ describe('receipts API', () => {
     }));
   });
 
+  it('updates the remaining payment balance only for approved refunds', async () => {
+    database.receiptFindStage.mockResolvedValue({ id: 'initial-receipt' });
+    database.refundRequestAggregate.mockResolvedValue({ _sum: { amount: 10000 } });
+    const response = await requestCustomerReceipt({
+      receiptDate: '2026-10-15',
+      receivedFrom: 'Asha Sharma',
+      amount: 60000,
+      paymentMode: 'UPI',
+      transactionId: 'TXN-CUSTOMER-REFUND-1',
+      receivedDate: '2026-10-15',
+    });
+    expect(response.status).toBe(201);
+    expect(database.refundRequestAggregate).toHaveBeenCalledWith(expect.objectContaining({
+      where: { tenantId: 'tenant-a', bookingId: 'booking-a', status: 'APPROVED' },
+    }));
+  });
+
   it('rejects a CRM customer receipt when the amount exceeds the remaining balance', async () => {
     database.receiptFindStage.mockResolvedValue({ id: 'initial-receipt' });
-    const response = await requestCustomerReceipt({ amount: 50001, receiptDate: '2026-10-15', receivedFrom: 'Asha Sharma', paymentMode: 'UPI', receivedDate: '2026-10-15' });
+    const response = await requestCustomerReceipt({ amount: 50001, receiptDate: '2026-10-15', receivedFrom: 'Asha Sharma', paymentMode: 'UPI', transactionId: 'TXN-CUSTOMER-2', receivedDate: '2026-10-15' });
     expect(response.status).toBe(409);
     expect(database.receiptCreate).not.toHaveBeenCalled();
   });
@@ -270,6 +491,7 @@ describe('receipts API', () => {
       receivedFrom: 'Asha Sharma',
       amount: 1,
       paymentMode: 'UPI',
+      transactionId: 'TXN-CUSTOMER-3',
       receivedDate: '2026-10-15',
       installmentIndex: 0,
     });
@@ -298,6 +520,7 @@ describe('receipts API', () => {
       receivedFrom: 'Asha Sharma',
       amount: 25001,
       paymentMode: 'UPI',
+      transactionId: 'TXN-CUSTOMER-4',
       receivedDate: '2026-10-17',
       installmentIndex: 1,
     });
@@ -312,6 +535,7 @@ describe('receipts API', () => {
       receivedFrom: 'Asha Sharma',
       amount: 25000,
       paymentMode: 'UPI',
+      transactionId: 'TXN-CUSTOMER-5',
       receivedDate: '2026-10-15',
       installmentIndex: 1,
     });
@@ -390,6 +614,12 @@ describe('receipts API', () => {
       where: { id: 'booking-a', tenantId: 'tenant-a', status: 'RESERVED' },
       data: { status: 'BOOKED', ownerId: 'crm-a' },
     });
+    expect(database.moveLeadToBookedBucket).toHaveBeenCalledWith(
+      'lead-a',
+      'booking',
+      expect.any(Object),
+      'sales-a',
+    );
   });
 
   it('rejects a packet in MIS and releases its reserved unit without CRM assignment', async () => {

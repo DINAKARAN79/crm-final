@@ -3,9 +3,9 @@
 import * as React from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { ArrowLeft, Download, ExternalLink, CheckCircle2, Eye, Loader2, Receipt, RefreshCw, StickyNote, XCircle } from "lucide-react";
+import { ArrowLeft, Download, ExternalLink, Eye, Loader2, MoreHorizontal, Receipt, RefreshCw, StickyNote, XCircle } from "lucide-react";
 import { BOOKING_STAGE_OPTIONS } from "@dct-crm/shared";
-import { bookingApi } from "@/lib/api";
+import { bookingApi, getSessionToken } from "@/lib/api";
 import { useRecordView } from "@/components/crm/list-view-control";
 import { useAuth } from "@/contexts/auth-context";
 import { Button } from "@/components/ui/button";
@@ -17,11 +17,263 @@ import { BookingDetailsBody, type BookingRecord } from "@/components/crm/lead-bo
 import { PdfDocumentPreview, type PdfPreviewDocument } from "@/components/crm/pdf-document-preview";
 import { LeadReceipts } from "@/components/crm/lead-receipts";
 import { LeadInstallments } from "@/components/crm/lead-installments";
-import StickyNotesCard from "@/components/crm/sticky-notes-card";
 import LeadActivityHistoryCard from "@/components/crm/lead-activity-history-card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
-import { cn } from "@/lib/utils";
+import { getTenantTimezone } from "@/lib/date-format";
+
+interface BookingAuditEntry {
+  id: string;
+  action: string;
+  oldValues?: Record<string, unknown> | null;
+  newValues?: Record<string, unknown> | null;
+  createdAt: string;
+  user?: { firstName: string; lastName: string } | null;
+  impersonatedByName?: string | null;
+}
+
+interface BookingNoteEntry {
+  id: string;
+  description?: string | null;
+  createdAt: string;
+  user?: { firstName: string; lastName: string } | null;
+}
+
+function displayStatus(value: unknown): string {
+  return typeof value === "string" && value
+    ? value.replace(/_/g, " ").toLowerCase().replace(/\b\w/g, (letter) => letter.toUpperCase())
+    : "—";
+}
+
+function BookingStagePath({ stage }: { stage: string }) {
+  const cancelled = stage === "CANCELLED";
+  const currentIndex = BOOKING_STAGE_OPTIONS.findIndex((option) => option.value === stage);
+
+  return (
+    <div className="overflow-x-auto pb-1">
+      <ol aria-label="Booking stage" className="grid min-w-[960px] grid-cols-6">
+        {BOOKING_STAGE_OPTIONS.map((option, index) => {
+          const current = option.value === stage;
+          const completed = !cancelled && currentIndex >= 0 && index < currentIndex;
+          const classes = current
+            ? cancelled
+              ? "bg-red-600 text-white"
+              : "bg-blue-600 text-white"
+            : completed
+              ? "bg-blue-100 text-blue-800"
+              : "bg-sky-100 text-[#1479a8]";
+
+          return (
+            <li
+              key={option.value}
+              aria-current={current ? "step" : undefined}
+              className={`flex h-8 items-center justify-center whitespace-nowrap px-5 text-center text-[11px] font-semibold ${classes}`}
+              style={{
+                clipPath: index === 0
+                  ? "polygon(0 0, calc(100% - 12px) 0, 100% 50%, calc(100% - 12px) 100%, 0 100%)"
+                  : "polygon(0 0, calc(100% - 12px) 0, 100% 50%, calc(100% - 12px) 100%, 0 100%, 12px 50%)",
+                marginLeft: index === 0 ? 0 : -8,
+                zIndex: BOOKING_STAGE_OPTIONS.length - index,
+              }}
+            >
+              {option.label}
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
+function formatBookingDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Date unavailable";
+  return new Intl.DateTimeFormat("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: getTenantTimezone(),
+  }).format(date);
+}
+
+function BookingStatusHistory({ booking }: { booking: BookingRecord }) {
+  const [history, setHistory] = React.useState<BookingAuditEntry[]>([]);
+  const [loading, setLoading] = React.useState(true);
+
+  React.useEffect(() => {
+    let active = true;
+    setLoading(true);
+    bookingApi.getAuditHistory(booking.id, { page: 1, limit: 100 })
+      .then((response) => {
+        if (active) setHistory((response.data.data || []) as BookingAuditEntry[]);
+      })
+      .catch(() => {
+        if (active) setHistory([]);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, [booking.id, booking.updatedAt]);
+
+  const changes = history.flatMap((entry) => {
+    const oldValues = entry.oldValues || {};
+    const newValues = entry.newValues || {};
+    const remarks = ["remarks", "remark", "notes", "reason", "cancellationReason", "reviewNote"]
+      .map((key) => newValues[key])
+      .find((value): value is string => typeof value === "string" && value.trim().length > 0);
+    return ["bookingStage", "status"].flatMap((field) => {
+      if (
+        !Object.prototype.hasOwnProperty.call(oldValues, field)
+        || !Object.prototype.hasOwnProperty.call(newValues, field)
+        || oldValues[field] === newValues[field]
+      ) return [];
+      return [{
+        id: `${entry.id}-${field}`,
+        label: field === "bookingStage" ? "Booking stage" : "Booking status",
+        from: oldValues[field],
+        to: newValues[field],
+        date: entry.createdAt,
+        actor: entry.user ? [entry.user.firstName, entry.user.lastName].filter(Boolean).join(" ") : "System",
+        impersonatedByName: entry.impersonatedByName,
+        remarks,
+      }];
+    });
+  });
+
+  const stageLabel = BOOKING_STAGE_OPTIONS.find((option) => option.value === booking.bookingStage)?.label || displayStatus(booking.bookingStage);
+
+  return (
+    <div className="space-y-2 border-t border-sky-100 pt-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs font-semibold uppercase tracking-wide text-[#1479a8]">Booking status</p>
+        <p className="text-sm font-semibold text-[#075d91]">{stageLabel}</p>
+      </div>
+      {changes.length > 0 && (
+        <ol className="space-y-2" aria-label="Booking status history">
+          {changes.slice(0, 5).map((change) => (
+            <li key={change.id} className="rounded-md border border-sky-100 bg-white px-3 py-2 text-xs">
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-[#1479a8]">{change.label}</p>
+              <p className="font-medium text-slate-800">
+                {displayStatus(change.from)} <span aria-hidden="true">→</span> {displayStatus(change.to)}
+              </p>
+              <p className="mt-1 text-muted-foreground">
+                {change.actor}{change.impersonatedByName ? ` (via ${change.impersonatedByName})` : ""} · {formatBookingDate(change.date)}
+              </p>
+              {change.remarks && <p className="mt-1 text-slate-600">Remarks: {change.remarks}</p>}
+            </li>
+          ))}
+        </ol>
+      )}
+      {!loading && changes.length === 0 && <p className="text-xs text-muted-foreground">No status changes recorded yet.</p>}
+      {loading && <p className="text-xs text-muted-foreground">Loading status history…</p>}
+    </div>
+  );
+}
+
+function BookingNotesCard({ bookingId }: { bookingId: string }) {
+  const { toast } = useToast();
+  const [notes, setNotes] = React.useState<BookingNoteEntry[]>([]);
+  const [loading, setLoading] = React.useState(true);
+  const [dialogOpen, setDialogOpen] = React.useState(false);
+  const [draft, setDraft] = React.useState("");
+  const [saving, setSaving] = React.useState(false);
+
+  const refresh = React.useCallback(async () => {
+    setLoading(true);
+    try {
+      const response = await bookingApi.getActivityHistory(bookingId, { page: 1, limit: 100 });
+      const activities = (response.data.data || []) as Array<BookingNoteEntry & { type?: string }>;
+      setNotes(activities.filter((activity) => activity.type === "NOTE"));
+    } catch {
+      toast({ title: "Booking notes could not be loaded", variant: "destructive" });
+    } finally {
+      setLoading(false);
+    }
+  }, [bookingId, toast]);
+
+  React.useEffect(() => { void refresh(); }, [refresh]);
+
+  const save = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const note = draft.trim();
+    if (!note || saving) return;
+    setSaving(true);
+    try {
+      const token = getSessionToken();
+      const response = await fetch(`/api/proxy/api/bookings/${encodeURIComponent(bookingId)}/notes`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ note }),
+      });
+      const result = await response.json() as { success?: boolean; error?: string };
+      if (!response.ok || !result.success) throw new Error(result.error || "Unable to save note");
+      setDialogOpen(false);
+      setDraft("");
+      toast({ title: "Booking note added" });
+      await refresh();
+    } catch (error) {
+      toast({
+        title: "Unable to save booking note",
+        description: error instanceof Error ? error.message : "Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <>
+      <Card className="rounded-xl border-sky-100 bg-[#f5fbff] shadow-sm">
+        <CardContent className="space-y-3 p-4">
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="text-sm font-semibold text-[#075d91]"><StickyNote className="mr-1.5 inline h-4 w-4" />Booking Notes</h2>
+            <Button size="sm" variant="outline" onClick={() => setDialogOpen(true)}>Add Note</Button>
+          </div>
+          {loading && notes.length === 0 ? (
+            <p className="text-xs text-muted-foreground">Loading notes…</p>
+          ) : notes.length === 0 ? (
+            <p className="text-xs text-muted-foreground">No booking notes recorded.</p>
+          ) : (
+            <ul className="max-h-72 space-y-2 overflow-y-auto">
+              {notes.map((note) => (
+                <li key={note.id} className="rounded-md border border-sky-100 bg-white p-3">
+                  <p className="whitespace-pre-wrap break-words text-sm text-slate-700">{note.description}</p>
+                  <p className="mt-2 text-[11px] text-muted-foreground">
+                    {[note.user?.firstName, note.user?.lastName].filter(Boolean).join(" ") || "Unknown"} · {formatBookingDate(note.createdAt)}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          )}
+        </CardContent>
+      </Card>
+      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+        <DialogContent>
+          <form onSubmit={(event) => void save(event)}>
+            <DialogHeader>
+              <DialogTitle>Add booking note</DialogTitle>
+              <DialogDescription>This note is saved to this booking’s activity history.</DialogDescription>
+            </DialogHeader>
+            <Textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Enter a booking note" rows={5} maxLength={5000} />
+            <DialogFooter className="mt-4">
+              <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button>
+              <Button type="submit" disabled={saving || !draft.trim()}>
+                {saving && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}Save Note
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
 
 export default function BookingRecordPage() {
   const { id } = useParams<{ id: string }>();
@@ -34,7 +286,6 @@ export default function BookingRecordPage() {
   const [loading, setLoading] = React.useState(true);
   const [saving, setSaving] = React.useState(false);
   const [tab, setTab] = React.useState("details");
-  const [notesSignal, setNotesSignal] = React.useState(0);
   const [cancelOpen, setCancelOpen] = React.useState(false);
   const [cancelNotes, setCancelNotes] = React.useState("");
   const [pdfPreview, setPdfPreview] = React.useState<PdfPreviewDocument | null>(null);
@@ -151,8 +402,6 @@ export default function BookingRecordPage() {
     return <div className="p-6 text-sm text-muted-foreground">Booking not found.</div>;
   }
 
-  const currentIndex = BOOKING_STAGE_OPTIONS.findIndex((option) => option.value === stage);
-
   return (
     <div className="crm-sky mx-auto w-full max-w-none space-y-3 p-3 sm:p-4 [&_button.border]:border-sky-200 [&_button.border]:text-[#075d91] [&_button.border:hover]:bg-sky-50 [&_[data-radix-collection-item]]:cursor-pointer">
       <Button asChild variant="ghost" size="sm" className="text-[#075d91] hover:bg-sky-50">
@@ -165,12 +414,22 @@ export default function BookingRecordPage() {
             <div>
               <p className="text-xs font-semibold uppercase tracking-wide text-[#1479a8]">Booking</p>
               <h1 className="text-xl font-bold text-[#075d91]">{booking.bookingNumber}</h1>
+              {(isAdmin || isSuperAdmin) && booking.status === "BOOKED" && (
+                <span className="mt-1 inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-800">
+                  Marked as Booked
+                </span>
+              )}
               <p className="text-sm text-muted-foreground">{booking.project.name} · {booking.unit.number}</p>
               <p className="text-sm text-muted-foreground">
-                CRM Owner: <span className="font-medium text-foreground">{[booking.owner?.firstName, booking.owner?.lastName].filter(Boolean).join(" ") || [booking.lead?.owner?.firstName, booking.lead?.owner?.lastName].filter(Boolean).join(" ") || "—"}</span>
+                CRM Owner: <span className="font-medium text-foreground">
+                  {[booking.lead?.bookedBy?.firstName, booking.lead?.bookedBy?.lastName].filter(Boolean).join(" ")
+                    || [booking.owner?.firstName, booking.owner?.lastName].filter(Boolean).join(" ")
+                    || [booking.lead?.owner?.firstName, booking.lead?.owner?.lastName].filter(Boolean).join(" ")
+                    || "—"}
+                </span>
               </p>
             </div>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button size="sm" disabled={saving || cancelled}>
@@ -190,25 +449,39 @@ export default function BookingRecordPage() {
                   <XCircle className="mr-1.5 h-4 w-4" />{cancellationPending ? "Cancellation Pending" : "Cancellation"}
                 </Button>
               )}
-              <Button size="sm" variant="outline" onClick={() => setNotesSignal((value) => value + 1)}>
-                <StickyNote className="mr-1.5 h-4 w-4" />Add Notes
-              </Button>
               <Button size="sm" variant="outline" onClick={() => setTab("receipts")}>
                 <Receipt className="mr-1.5 h-4 w-4" />Create Receipt
               </Button>
-              {booking.lead && (isAdmin || isSuperAdmin) && (
-                <Button asChild variant="outline" size="sm">
-                  <Link href={`/leads/${booking.lead.id}`}><ExternalLink className="mr-1.5 h-4 w-4" />Lead</Link>
-                </Button>
-              )}
-              <Button size="sm" className="bg-[#0b2545] text-white hover:bg-[#08182d]" disabled={previewing} onClick={() => void previewPdf()}>
-                {previewing ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Eye className="mr-1.5 h-4 w-4" />}Preview PDF
-              </Button>
-              <Button variant="outline" size="sm" onClick={() => void downloadPdf()}>
-                <Download className="mr-1.5 h-4 w-4" />Download PDF
-              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button size="sm" variant="outline">
+                    <MoreHorizontal className="mr-1.5 h-4 w-4" />More options
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  {booking.lead && (isAdmin || isSuperAdmin) && (
+                    <DropdownMenuItem asChild>
+                      <Link href={`/leads/${booking.lead.id}`}><ExternalLink className="mr-2 h-4 w-4" />Lead</Link>
+                    </DropdownMenuItem>
+                  )}
+                  <DropdownMenuItem disabled={previewing} onSelect={() => void previewPdf()}>
+                    {previewing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Eye className="mr-2 h-4 w-4" />}
+                    Preview PDF
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => void downloadPdf()}>
+                    <Download className="mr-2 h-4 w-4" />Download PDF
+                  </DropdownMenuItem>
+                  {(booking.status === "BOOKED" || booking.status === "CONFIRMED") && (
+                    <DropdownMenuItem onSelect={() => setTab("receipts")}>
+                      <RefreshCw className="mr-2 h-4 w-4" />Refund
+                    </DropdownMenuItem>
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
           </div>
+
+          <BookingStagePath stage={stage} />
 
           {cancellationPending && (
             <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
@@ -220,31 +493,7 @@ export default function BookingRecordPage() {
               MIS rejected the last cancellation request{booking.cancellationReviewNote ? `: ${booking.cancellationReviewNote}` : "."}
             </p>
           )}
-          <div className="flex w-full overflow-x-auto" role="list" aria-label="Booking status">
-            {BOOKING_STAGE_OPTIONS.map((option, index) => {
-              const isCancelStep = option.value === "CANCELLED";
-              const active = option.value === stage;
-              const done = !cancelled && index < currentIndex;
-              return (
-                <button
-                  key={option.value}
-                  type="button"
-                  role="listitem"
-                  disabled={saving || cancelled || isCancelStep}
-                  onClick={() => void changeStage(option.value)}
-                  className={cn(
-                    "relative min-w-[100px] flex-1 px-4 py-1.5 text-center text-[11px] font-medium leading-tight transition-colors",
-                    "[clip-path:polygon(0_0,calc(100%-14px)_0,100%_50%,calc(100%-14px)_100%,0_100%,14px_50%)] first:[clip-path:polygon(0_0,calc(100%-14px)_0,100%_50%,calc(100%-14px)_100%,0_100%)]",
-                    active && isCancelStep && "bg-red-700 text-white",
-                    active && !isCancelStep && "bg-gradient-to-r from-blue-600 to-blue-500 text-white",
-                    !active && "bg-sky-100 text-[#1479a8] hover:bg-sky-200",
-                  )}
-                >
-                  {(active || done) && <CheckCircle2 className="mr-1.5 inline h-3.5 w-3.5" />}{option.label}
-                </button>
-              );
-            })}
-          </div>
+          <BookingStatusHistory booking={booking} />
         </CardContent>
       </Card>
 
@@ -263,23 +512,21 @@ export default function BookingRecordPage() {
             </Card>
           </TabsContent>
           <TabsContent value="payments">
-            {booking.lead && <LeadInstallments leadId={booking.lead.id} />}
+            {booking.lead && <LeadInstallments leadId={booking.lead.id} bookingId={booking.id} />}
           </TabsContent>
           <TabsContent value="receipts">
-            {booking.lead && <LeadReceipts leadId={booking.lead.id} />}
+            {booking.lead && <LeadReceipts leadId={booking.lead.id} bookingId={booking.id} />}
           </TabsContent>
         </Tabs>
-        {booking.lead && (
-          <aside className="min-w-0 space-y-4">
-            <StickyNotesCard recordId={booking.lead.id} canAdd openSignal={notesSignal} />
-            <LeadActivityHistoryCard
-              bookingId={booking.id}
-              leadName={booking.bookingNumber}
-              refreshKey={booking.id}
-              canViewAuditHistory
-            />
-          </aside>
-        )}
+        <aside className="min-w-0 space-y-4">
+          <BookingNotesCard bookingId={booking.id} />
+          <LeadActivityHistoryCard
+            bookingId={booking.id}
+            leadName={booking.bookingNumber}
+            refreshKey={booking.id}
+            canViewAuditHistory
+          />
+        </aside>
       </div>
       <PdfDocumentPreview preview={pdfPreview} onClose={closePdfPreview} />
       <Dialog open={cancelOpen} onOpenChange={setCancelOpen}>

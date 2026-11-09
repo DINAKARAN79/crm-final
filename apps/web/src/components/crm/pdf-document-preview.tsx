@@ -72,7 +72,7 @@ export function PdfDocumentPreview({
             ref={frame}
             title={`${preview.number} PDF`}
             src={preview.url}
-            className="min-h-0 w-full flex-1 bg-slate-100"
+            className="block min-h-0 w-full flex-1 bg-slate-100"
           />
         )}
       </DialogContent>

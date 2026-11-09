@@ -1,5 +1,7 @@
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@dct-crm/db';
+import { DEFAULT_CRM_TIMEZONE, formatCRMDateTime } from '@dct-crm/shared';
+import { getTenantTimezone } from './tenantTimezone';
 import { normalizeLeadEmail, normalizeLeadPhone } from './leadDuplicateDetection';
 
 type Db = Prisma.TransactionClient | typeof prisma;
@@ -192,7 +194,7 @@ export function presentEnquiry<T extends {
   phone?: string | null;
   createdAt?: Date | string | null;
   lead?: { leadNumber?: string | null; firstName?: string | null; lastName?: string | null; owner?: { firstName?: string | null; lastName?: string | null } | null } | null;
-}>(enquiry: T) {
+}>(enquiry: T, timeZone = DEFAULT_CRM_TIMEZONE) {
   const lead = enquiry.lead;
   const leadName = [lead?.firstName, lead?.lastName].filter(Boolean).join(' ').trim();
   const leadOwnerName = [lead?.owner?.firstName, lead?.owner?.lastName].filter(Boolean).join(' ').trim();
@@ -204,7 +206,7 @@ export function presentEnquiry<T extends {
     leadOwnerName: leadOwnerName || null,
     phoneWithCountryCode: [enquiry.countryCode, enquiry.phone].filter(Boolean).join(' ') || null,
     createdDateDisplay: created && !Number.isNaN(created.getTime())
-      ? new Intl.DateTimeFormat('en-IN', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Kolkata' }).format(created)
+      ? formatCRMDateTime(created, timeZone)
       : null,
   };
 }
@@ -229,8 +231,9 @@ export async function getLeadEnquiries(
     }),
     prisma.enquiry.count({ where }),
   ]);
+    const timeZone = await getTenantTimezone(tenantId);
     return {
-    data: data.map(presentEnquiry),
+    data: data.map((item) => presentEnquiry(item, timeZone)),
     pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
   };
 }
@@ -256,5 +259,5 @@ export async function getEnquiryById(tenantId: string | undefined, enquiryId: st
       },
     },
   });
-  return enquiry ? presentEnquiry(enquiry) : null;
+  return enquiry ? presentEnquiry(enquiry, await getTenantTimezone(tenantId || enquiry.tenantId)) : null;
 }

@@ -1,7 +1,17 @@
 import { z } from 'zod';
 
 export const PHONE_DUPLICATE_ERROR = 'Phone number already exists for another lead.';
-const CRM_TIMEZONE = 'Asia/Kolkata';
+export const DEFAULT_CRM_TIMEZONE = 'Asia/Kolkata';
+
+export function resolveCRMTimezone(timeZone?: string | null): string {
+  if (!timeZone) return DEFAULT_CRM_TIMEZONE;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone }).format(0);
+    return timeZone;
+  } catch {
+    return DEFAULT_CRM_TIMEZONE;
+  }
+}
 
 export const PROSPECT_BUDGET_OPTIONS = [
   '5 lakhs', '10 lakhs', '15 lakhs', '20 lakhs', '25 lakhs', '30 lakhs', '35 lakhs',
@@ -234,23 +244,24 @@ export function normalizePermissionName(permissionName: string): string {
 
 const formatterCache = new Map<string, Intl.DateTimeFormat>();
 
-function getCRMFormatter(options: Intl.DateTimeFormatOptions): Intl.DateTimeFormat {
-  const key = JSON.stringify(options);
+function getCRMFormatter(options: Intl.DateTimeFormatOptions, timeZone = DEFAULT_CRM_TIMEZONE): Intl.DateTimeFormat {
+  const resolvedTimeZone = resolveCRMTimezone(timeZone);
+  const key = JSON.stringify([options, resolvedTimeZone]);
   let formatter = formatterCache.get(key);
   if (!formatter) {
-    formatter = new Intl.DateTimeFormat('en-IN', { ...options, timeZone: CRM_TIMEZONE });
+    formatter = new Intl.DateTimeFormat('en-IN', { ...options, timeZone: resolvedTimeZone });
     formatterCache.set(key, formatter);
   }
   return formatter;
 }
 
-export function formatCRMDate(value: string | number | Date): string {
+export function formatCRMDate(value: string | number | Date, timeZone = DEFAULT_CRM_TIMEZONE): string {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return '-';
-  return getCRMFormatter({ day: 'numeric', month: 'short', year: 'numeric' }).format(date);
+  return getCRMFormatter({ day: 'numeric', month: 'short', year: 'numeric' }, timeZone).format(date);
 }
 
-export function formatCRMDateTime(value: string | number | Date): string {
+export function formatCRMDateTime(value: string | number | Date, timeZone = DEFAULT_CRM_TIMEZONE): string {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return '-';
   return getCRMFormatter({
@@ -259,40 +270,67 @@ export function formatCRMDateTime(value: string | number | Date): string {
     year: 'numeric',
     hour: '2-digit',
     minute: '2-digit',
-  }).format(date);
+  }, timeZone).format(date);
 }
 
-export function crmLocalDateTimeToDate(date: string, time: string): Date {
+export function crmLocalDateTimeToDate(date: string, time: string, timeZone = DEFAULT_CRM_TIMEZONE): Date {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
   const timeMatch = /^(\d{2}):(\d{2})$/.exec(time);
   if (!match || !timeMatch) throw new Error('Invalid CRM date/time');
   const [, year, month, day] = match;
   const [, hour, minute] = timeMatch;
-  return new Date(Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute)) - 330 * 60 * 1000);
+  const resolvedTimeZone = resolveCRMTimezone(timeZone);
+  const desired = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute));
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: resolvedTimeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  });
+  let timestamp = desired;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const parts = Object.fromEntries(formatter.formatToParts(new Date(timestamp)).map((part) => [part.type, part.value]));
+    const represented = Date.UTC(
+      Number(parts.year),
+      Number(parts.month) - 1,
+      Number(parts.day),
+      Number(parts.hour),
+      Number(parts.minute),
+      Number(parts.second),
+    );
+    const next = desired - (represented - timestamp);
+    if (next === timestamp) break;
+    timestamp = next;
+  }
+  return new Date(timestamp);
 }
 
-export function crmDateToUtcStart(date: string): Date {
-  return crmLocalDateTimeToDate(date, '00:00');
+export function crmDateToUtcStart(date: string, timeZone = DEFAULT_CRM_TIMEZONE): Date {
+  return crmLocalDateTimeToDate(date, '00:00', timeZone);
 }
 
 /** Inclusive CRM-calendar range. The end bound is the start of the next day, so the selected To Date includes every timestamp on that day. */
-export function crmDateRangeBounds(startDate?: string, endDate?: string): { gte?: Date; lt?: Date } | { error: string } {
+export function crmDateRangeBounds(startDate?: string, endDate?: string, timeZone = DEFAULT_CRM_TIMEZONE): { gte?: Date; lt?: Date } | { error: string } {
   const start = startDate?.trim() || '';
   const end = endDate?.trim() || '';
   if (start && !/^\d{4}-\d{2}-\d{2}$/.test(start)) return { error: 'From Date is invalid' };
   if (end && !/^\d{4}-\d{2}-\d{2}$/.test(end)) return { error: 'To Date is invalid' };
   if (start && end && start > end) return { error: 'To Date cannot be earlier than From Date' };
   const range: { gte?: Date; lt?: Date } = {};
-  if (start) range.gte = crmDateToUtcStart(start);
+  if (start) range.gte = crmDateToUtcStart(start, timeZone);
   if (end) {
-    const endExclusive = crmDateToUtcStart(end);
-    endExclusive.setUTCDate(endExclusive.getUTCDate() + 1);
-    range.lt = endExclusive;
+    const [year, month, day] = end.split('-').map(Number);
+    const nextDate = new Date(Date.UTC(year, month - 1, day + 1)).toISOString().slice(0, 10);
+    range.lt = crmDateToUtcStart(nextDate, timeZone);
   }
   return range;
 }
 
-export function crmDateTimeInputValue(value = new Date()): string {
+export function crmDateTimeInputValue(value = new Date(), timeZone = DEFAULT_CRM_TIMEZONE): string {
   const parts = getCRMFormatter({
     year: 'numeric',
     month: '2-digit',
@@ -300,20 +338,23 @@ export function crmDateTimeInputValue(value = new Date()): string {
     hour: '2-digit',
     minute: '2-digit',
     hourCycle: 'h23',
-  }).formatToParts(value);
+  }, timeZone).formatToParts(value);
   const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   return `${values.year}-${values.month}-${values.day}T${values.hour}:${values.minute}`;
 }
 
-export function getCRMDayBounds(now = new Date()): { start: Date; end: Date } {
+export function getCRMDayBounds(now = new Date(), timeZone = DEFAULT_CRM_TIMEZONE): { start: Date; end: Date } {
   const parts = getCRMFormatter({
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
-  }).formatToParts(now);
+  }, timeZone).formatToParts(now);
   const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  const start = new Date(Date.UTC(Number(values.year), Number(values.month) - 1, Number(values.day)) - 330 * 60 * 1000);
-  return { start, end: new Date(start.getTime() + 24 * 60 * 60 * 1000) };
+  const date = `${values.year}-${values.month}-${values.day}`;
+  const start = crmDateToUtcStart(date, timeZone);
+  const nextDate = new Date(`${date}T00:00:00.000Z`);
+  nextDate.setUTCDate(nextDate.getUTCDate() + 1);
+  return { start, end: crmDateToUtcStart(nextDate.toISOString().slice(0, 10), timeZone) };
 }
 
 export function normalizePhone(raw: string): string {

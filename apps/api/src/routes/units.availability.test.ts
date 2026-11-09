@@ -30,7 +30,7 @@ vi.mock('../middleware/authorization', () => ({
 
 vi.mock('../middleware/audit', () => ({ auditLog: vi.fn() }));
 
-import unitsRouter from './units';
+import unitsRouter, { unitSchema, updateUnitSchema } from './units';
 
 const servers: Server[] = [];
 
@@ -57,6 +57,16 @@ afterEach(async () => {
 });
 
 describe('unit inventory availability', () => {
+  it('only accepts selectable unit statuses for manual changes', () => {
+    const createInput = { projectId: 'project-a', number: 'A-101', type: 'Plot', price: 0 };
+    expect(unitSchema.safeParse({ ...createInput, status: 'AVAILABLE' }).success).toBe(true);
+    expect(unitSchema.safeParse({ ...createInput, status: 'RESERVED' }).success).toBe(true);
+    expect(updateUnitSchema.safeParse({ status: 'BOOKED' }).success).toBe(true);
+    expect(updateUnitSchema.safeParse({ status: 'SOLD' }).success).toBe(false);
+    expect(updateUnitSchema.safeParse({ status: 'HOLD' }).success).toBe(false);
+    expect(updateUnitSchema.safeParse({ status: 'BLOCKED' }).success).toBe(false);
+  });
+
   it('filters available inventory from the unit status only', async () => {
     const response = await listUnits('?status=AVAILABLE');
 

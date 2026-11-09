@@ -1,9 +1,10 @@
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@dct-crm/db';
-import { crmLocalDateTimeToDate } from '@dct-crm/shared';
+import { DEFAULT_CRM_TIMEZONE, getCRMDayBounds } from '@dct-crm/shared';
 import { tagLeadSiteVisitEvents } from './leadEventTagging';
+import { getTenantTimezone } from './tenantTimezone';
 
-export const CRM_TIMEZONE = 'Asia/Kolkata';
+export const CRM_TIMEZONE = DEFAULT_CRM_TIMEZONE;
 export const SITE_VISIT_MISSED_HOUR = 18;
 export const AUTO_MISSED_REASON =
   'Automatically marked missed at 6:00 PM because the site visit scheduled for that day was not completed.';
@@ -39,8 +40,8 @@ export function crmDateKey(now: Date, timeZone = CRM_TIMEZONE): string {
 
 export function crmDayRange(now: Date, timeZone = CRM_TIMEZONE): { start: Date; end: Date; dateKey: string } {
   const dateKey = crmDateKey(now, timeZone);
-  const start = crmLocalDateTimeToDate(dateKey, '00:00');
-  return { start, end: new Date(start.getTime() + 24 * 60 * 60 * 1000), dateKey };
+  const { start, end } = getCRMDayBounds(now, timeZone);
+  return { start, end, dateKey };
 }
 
 export function isSiteVisitMissedDeadlineReached(now: Date, timeZone = CRM_TIMEZONE): boolean {
@@ -48,18 +49,19 @@ export function isSiteVisitMissedDeadlineReached(now: Date, timeZone = CRM_TIMEZ
   return clock.hour >= SITE_VISIT_MISSED_HOUR;
 }
 
-export function missedJobDecision(now: Date, lastCompletedDate: string | null): { run: boolean; dateKey: string } {
-  const { dateKey } = crmDayRange(now);
-  if (!isSiteVisitMissedDeadlineReached(now) || lastCompletedDate === dateKey) {
+export function missedJobDecision(now: Date, lastCompletedDate: string | null, timeZone = CRM_TIMEZONE): { run: boolean; dateKey: string } {
+  const { dateKey } = crmDayRange(now, timeZone);
+  if (!isSiteVisitMissedDeadlineReached(now, timeZone) || lastCompletedDate === dateKey) {
     return { run: false, dateKey };
   }
   return { run: true, dateKey };
 }
 
 export async function normalizeOverdueSiteVisits(tenantId: string, now = new Date()): Promise<number> {
-  if (!isSiteVisitMissedDeadlineReached(now)) return 0;
+  const timeZone = await getTenantTimezone(tenantId);
+  if (!isSiteVisitMissedDeadlineReached(now, timeZone)) return 0;
 
-  const { start, end } = crmDayRange(now);
+  const { start, end } = crmDayRange(now, timeZone);
   const dueToday = await prisma.siteVisit.findMany({
     where: {
       tenantId,

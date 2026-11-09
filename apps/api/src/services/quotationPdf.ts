@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import PDFDocument from 'pdfkit';
-import { quotationDueLabel, quotationPropertyFields, quotationScheduleAmounts } from '@dct-crm/shared';
+import { formatCRMDate, quotationDueLabel, quotationPropertyFields, quotationScheduleAmounts } from '@dct-crm/shared';
 
 const NAVY = '#0b2545';
 const GOLD = '#c6a15b';
@@ -57,6 +57,7 @@ export interface QuotationPdfInput {
   logo?: Buffer | null;
   quotationNumber: string;
   quotationDate: Date;
+  timeZone?: string | null;
   status?: string | null;
   customerName?: string | null;
   customerPhone?: string | null;
@@ -106,11 +107,8 @@ function inr(amount: number): string {
   return `INR ${formatted}`;
 }
 
-function quotationDate(value: Date): string {
-  return new Intl.DateTimeFormat('en-IN', {
-    dateStyle: 'medium',
-    timeZone: 'Asia/Kolkata',
-  }).format(value);
+function quotationDate(value: Date, timeZone?: string | null): string {
+  return formatCRMDate(value, timeZone || undefined);
 }
 
 function paintPaper(document: PDFKit.PDFDocument) {
@@ -185,7 +183,11 @@ function drawTable(
     document.rect(LEFT, top, WIDTH, 20).fill(NAVY);
     document.font('Helvetica-Bold').fontSize(8).fillColor(WHITE);
     columns.forEach((column) => {
-      document.text(column.label, column.x, top + 6, { width: column.width, align: column.align, lineBreak: false });
+      document.text(column.label, column.x + PAD, top + 6, {
+        width: column.width - PAD * 2,
+        align: column.align,
+        lineBreak: false,
+      });
     });
     document.y = top + 20;
     drawingHeader = false;
@@ -211,8 +213,8 @@ function drawTable(
         const column = columns[index];
         if (!column) return;
         document.font(cell.bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(8.5).fillColor(row.color || INK)
-          .text(cell.text, column.x, top + 6, {
-            width: column.width,
+          .text(cell.text, column.x + PAD, top + 6, {
+            width: column.width - PAD * 2,
             align: column.align,
             height: height - 8,
             ellipsis: true,
@@ -249,7 +251,7 @@ function drawBody(document: PDFKit.PDFDocument, input: QuotationPdfInput) {
     { label: 'Project', value: text(input.projectName) },
     { label: 'Project location', value: text(input.projectAddress) },
     { label: 'Quotation number', value: text(input.quotationNumber) },
-    { label: 'Quotation date', value: quotationDate(input.quotationDate) },
+    { label: 'Quotation date', value: quotationDate(input.quotationDate, input.timeZone) },
   ]);
 
   sectionTitle(document, 'Property');
@@ -270,12 +272,15 @@ function drawBody(document: PDFKit.PDFDocument, input: QuotationPdfInput) {
   const rate = Number.isFinite(input.pricePerSqFt) ? inr(input.pricePerSqFt) : blank;
   const areaLabel = input.area == null || !Number.isFinite(input.area) ? blank : `${input.area.toLocaleString('en-IN')} sq ft`;
   const subtotal = input.basePrice + input.plcAmount;
+  const discountPercent = input.basePrice > 0
+    ? Number((input.discountAmount / input.basePrice * 100).toFixed(2))
+    : 0;
   const priceRows: Array<[string, string, string]> = [
     ['Base price', `${areaLabel} × ${rate} / sq ft`, inr(input.basePrice)],
     ['Additional charges', 'PLC and other charges', inr(input.plcAmount)],
     ['Subtotal', 'Base price plus additional charges', inr(subtotal)],
-    ['Discount', 'Saved on this quotation', input.discountAmount > 0 ? `-${inr(input.discountAmount)}` : inr(0)],
-    ['Taxes', 'No separate tax on this quotation', inr(0)],
+    ['Discount', `${discountPercent}% of unit base price`, input.discountAmount > 0 ? `-${inr(input.discountAmount)}` : inr(0)],
+    ['Taxes', 'No tax configuration is available', 'Not included'],
   ];
   drawTable(document, priceColumns, [
     ...priceRows.map((row, index) => ({
@@ -478,7 +483,7 @@ function drawChrome(document: PDFKit.PDFDocument, input: QuotationPdfInput, page
     document.font('Helvetica-Bold').fontSize(11).fillColor(WHITE)
       .text(input.headerNumber || input.quotationNumber, metaX, 190, { width: metaWidth, align: 'right', height: 14, ellipsis: true });
     document.font('Helvetica').fontSize(7.5).fillColor('#f3e6c8')
-      .text(`${quotationDate(input.quotationDate)}  ·  ${text(input.status).replace(/_/g, ' ')}`, metaX, 206, { width: metaWidth, align: 'right', lineBreak: false });
+      .text(`${quotationDate(input.quotationDate, input.timeZone)}  ·  ${text(input.status).replace(/_/g, ' ')}`, metaX, 206, { width: metaWidth, align: 'right', lineBreak: false });
   } else {
     document.rect(0, 0, pageWidth, 64).fill(NAVY);
     document.rect(0, 64, pageWidth, 3).fill(GOLD);
@@ -500,7 +505,7 @@ function drawChrome(document: PDFKit.PDFDocument, input: QuotationPdfInput, page
     document.font('Helvetica-Bold').fontSize(10).fillColor(WHITE)
       .text(input.headerNumber || input.quotationNumber, metaX, 18, { width: metaWidth, align: 'right', height: 14, ellipsis: true });
     document.font('Helvetica').fontSize(7.5).fillColor(GOLD)
-      .text(quotationDate(input.quotationDate), metaX, 36, { width: metaWidth, align: 'right', lineBreak: false });
+      .text(quotationDate(input.quotationDate, input.timeZone), metaX, 36, { width: metaWidth, align: 'right', lineBreak: false });
   }
 
   document.rect(0, 802, pageWidth, 40).fill(NAVY);

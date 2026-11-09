@@ -81,6 +81,7 @@ export const inviteUserSchema = z.object({
 });
 
 export const updateUserSchema = z.object({
+  email: z.string().trim().email('A valid email is required').transform((email) => email.toLowerCase()).optional(),
   firstName: z.string().trim().min(1, 'First name is required').optional(),
   lastName: z.string().trim().optional(),
   phone: z.string().optional(),
@@ -401,6 +402,19 @@ router.put('/:id', authorize('User', 'edit'), async (req: AuthRequest, res: Resp
     }
 
     const data = updateUserSchema.parse(req.body);
+    if (data.email !== undefined && data.email !== existingUser.email.toLowerCase()) {
+      const emailInUse = await prisma.user.findFirst({
+        where: {
+          tenantId: req.tenantId!,
+          id: { not: req.params.id },
+          email: { equals: data.email, mode: 'insensitive' },
+        },
+        select: { id: true },
+      });
+      if (emailInUse) {
+        return res.status(409).json({ success: false, error: 'This email is already being used in this company.' });
+      }
+    }
     const phone = resolveUserPhoneChange({
       mode: 'update',
       existingPhone: existingUser.phone,
@@ -461,6 +475,10 @@ router.put('/:id', authorize('User', 'edit'), async (req: AuthRequest, res: Resp
       },
     });
 
+    if (data.email !== undefined && data.email !== existingUser.email.toLowerCase()) {
+      await endAllUserSessions(existingUser.id, req.tenantId!, 'REVOKED');
+    }
+
     if (roleIds) {
       await prisma.$transaction(async (tx) => {
         await tx.userRole.deleteMany({ where: { userId: req.params.id } });
@@ -486,6 +504,14 @@ router.put('/:id', authorize('User', 'edit'), async (req: AuthRequest, res: Resp
   } catch (error: any) {
     if (error.name === 'ZodError' || error.name === 'ManagedUserFieldError') {
       return res.status(400).json({ success: false, error: error.name === 'ZodError' ? error.errors[0].message : error.message });
+    }
+    if (
+      error.code === 'P2002'
+      && Array.isArray(error.meta?.target)
+      && error.meta.target.includes('tenantId')
+      && error.meta.target.includes('email')
+    ) {
+      return res.status(409).json({ success: false, error: 'This email is already being used in this company.' });
     }
     console.error('Update user error:', error);
     res.status(500).json({ success: false, error: 'Failed to update user' });

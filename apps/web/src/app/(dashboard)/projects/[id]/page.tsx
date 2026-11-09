@@ -24,6 +24,7 @@ import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { CurrencyInput } from "@/components/ui/currency-input";
 import { Label } from "@/components/ui/label";
 
 import { useToast } from "@/hooks/use-toast";
@@ -787,7 +788,7 @@ export default function ProjectDetailPage() {
             </div>
             <div className="space-y-2">
               <Label htmlFor="unit-price">Price</Label>
-              <Input id="unit-price" inputMode="decimal" value={unitPriceInput} onChange={(event) => setUnitPriceInput(event.target.value)} required placeholder="0" />
+              <CurrencyInput id="unit-price" step="any" value={unitPriceInput} onChange={(event) => setUnitPriceInput(event.target.value)} required placeholder="0" />
             </div>
             <div className="space-y-2">
               <Label htmlFor="unit-status">Status</Label>

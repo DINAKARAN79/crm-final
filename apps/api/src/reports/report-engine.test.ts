@@ -28,6 +28,18 @@ describe('createCondition', () => {
       not: null,
     });
   });
+
+  it('interprets custom report date ranges in the tenant timezone', () => {
+    expect(createCondition(
+      { type: 'date', label: 'Created Date', path: 'createdAt' },
+      'customRange',
+      { start: '2026-07-01', end: '2026-07-01' },
+      'America/New_York',
+    )).toEqual({
+      gte: new Date('2026-07-01T04:00:00.000Z'),
+      lt: new Date('2026-07-02T04:00:00.000Z'),
+    });
+  });
 });
 
 describe('report validation', () => {

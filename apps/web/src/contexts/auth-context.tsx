@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { getDefaultLeadStatusLabel, normalizePermissionName } from "@dct-crm/shared";
+import { setTenantTimezone } from "@/lib/date-format";
 import {
   authApi,
   ApiResponse,
@@ -52,7 +53,7 @@ export interface AuthContextType {
   hasFullAccess: boolean;
   isSuperAdmin: boolean;
   isAdmin: boolean;
-  tenant: { id: string; name: string; slug: string; country?: string | null } | null;
+  tenant: { id: string; name: string; slug: string; country?: string | null; timezone?: string | null } | null;
   leadStatuses: LeadStatusOption[];
   getLeadStatusLabel: (status: string) => string;
   isLoading: boolean;
@@ -79,7 +80,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [hasFullAccess, setHasFullAccess] = React.useState(false);
   const [isSuperAdmin, setIsSuperAdmin] = React.useState(false);
   const [isAdmin, setIsAdmin] = React.useState(false);
-  const [tenant, setTenant] = React.useState<{ id: string; name: string; slug: string; country?: string | null } | null>(null);
+  const [tenant, setTenant] = React.useState<{ id: string; name: string; slug: string; country?: string | null; timezone?: string | null } | null>(null);
   const [leadStatuses, setLeadStatuses] = React.useState<LeadStatusOption[]>([]);
   const [isLoading, setIsLoading] = React.useState(true);
   const authRetryTimer = React.useRef<number | null>(null);
@@ -99,6 +100,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setHasFullAccess(data.hasFullAccess || false);
         setIsSuperAdmin(data.user?.isSuperAdmin || false);
         setTenant(data.tenant);
+        setTenantTimezone(data.tenant?.timezone);
         try {
           const statusResponse = await leadApi.statuses();
           const statuses = statusResponse.data?.data;
@@ -399,6 +401,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             setIsSuperAdmin(false);
             setIsAdmin(false);
             setTenant(null);
+            setTenantTimezone(null);
             setLeadStatuses([]);
             window.location.href = "/login";
           }

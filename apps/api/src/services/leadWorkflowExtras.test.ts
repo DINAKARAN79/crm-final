@@ -60,7 +60,7 @@ describe('overdue follow-up and Site Visit normalization', () => {
     }));
     expect(database.followUpUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: 'follow-up-1', isCompleted: false, isMissed: false },
-      data: { isMissed: true, missedAt: expect.any(Date) },
+      data: { isMissed: true, missedAt: expect.any(Date), status: 'MISSED' },
     }));
     expect(database.auditLogCreate).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({

@@ -9,7 +9,8 @@ import { dialpadCallToast } from "@/lib/telephony-call";
 import { requestLeadCall, useTelephonyActive, useTelephonyReasonCode } from "@/lib/telephony-client";
 import { useRecordView } from "@/components/crm/list-view-control";
 import { useAuth } from "@/contexts/auth-context";
-import { formatDateTime } from "@/lib/date-format";
+import { dateTimeInputValue, formatDateTime, getTenantTimezone } from "@/lib/date-format";
+import { crmLocalDateTimeToDate } from "@dct-crm/shared";
 import { useToast } from "@/hooks/use-toast";
 import { RecordPageHeader } from "@/components/crm/record-page-header";
 import { Badge } from "@/components/ui/badge";
@@ -73,11 +74,10 @@ function DetailRow({ label, value }: { label: string; value: React.ReactNode }) 
 }
 
 function toLocalDateTimeInputs(value: string) {
-  const date = new Date(value);
-  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  const local = dateTimeInputValue(new Date(value));
   return {
-    date: local.toISOString().slice(0, 10),
-    time: local.toISOString().slice(11, 16),
+    date: local.slice(0, 10),
+    time: local.slice(11, 16),
   };
 }
 
@@ -106,9 +106,12 @@ export default function FollowUpDetailPage() {
   const earliestFollowUp = new Date();
   earliestFollowUp.setSeconds(0, 0);
   earliestFollowUp.setMinutes(earliestFollowUp.getMinutes() + 1);
-  const followUpMinDate = `${earliestFollowUp.getFullYear()}-${String(earliestFollowUp.getMonth() + 1).padStart(2, "0")}-${String(earliestFollowUp.getDate()).padStart(2, "0")}`;
-  const followUpNowTime = `${String(earliestFollowUp.getHours()).padStart(2, "0")}:${String(earliestFollowUp.getMinutes()).padStart(2, "0")}`;
-  const editScheduledAt = editDate && editTime ? new Date(`${editDate}T${editTime}`) : null;
+  const earliestTenantDateTime = dateTimeInputValue(earliestFollowUp);
+  const followUpMinDate = earliestTenantDateTime.slice(0, 10);
+  const followUpNowTime = earliestTenantDateTime.slice(11, 16);
+  const editScheduledAt = editDate && editTime
+    ? crmLocalDateTimeToDate(editDate, editTime, getTenantTimezone())
+    : null;
   const editScheduleError = editing && editScheduledAt && (Number.isNaN(editScheduledAt.getTime()) || editScheduledAt.getTime() <= Date.now())
     ? "Choose a future date and time."
     : "";
@@ -157,7 +160,7 @@ export default function FollowUpDetailPage() {
       });
       return;
     }
-    const due = new Date(`${editDate}T${editTime}`);
+    const due = crmLocalDateTimeToDate(editDate, editTime, getTenantTimezone());
     if (Number.isNaN(due.getTime()) || due.getTime() <= Date.now()) {
       toast({
         title: "Choose a future time",

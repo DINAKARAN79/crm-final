@@ -51,7 +51,7 @@ const statusColors: Record<string, string> = {
   BLOCKED: "bg-red-100 text-red-800",
 };
 
-const STATUS_OPTIONS = ["AVAILABLE", "HOLD", "RESERVED", "BOOKED", "SOLD", "BLOCKED"];
+const STATUS_OPTIONS = ["AVAILABLE", "RESERVED", "BOOKED"];
 
 const columns: ColumnDef<Unit>[] = [
   {

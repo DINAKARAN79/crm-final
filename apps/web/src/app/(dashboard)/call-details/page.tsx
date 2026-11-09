@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { callDetailsApi } from "@/lib/api";
 import { maskDialpadNumber } from "@/lib/bizcall-dialpad";
+import { formatDateTime } from "@/lib/date-format";
 
 type UnlinkedCall = {
   id: string;
@@ -78,7 +79,7 @@ export default function CallDetailsIndexPage() {
               <div className="min-w-0">
                 <p className="truncate font-medium">{call.name}</p>
                 <p className="text-xs text-muted-foreground">
-                  {call.callType} · {call.status} · {new Date(call.startAt).toLocaleString()}
+                  {call.callType} · {call.status} · {formatDateTime(call.startAt)}
                 </p>
               </div>
               <span className="font-mono text-xs">{maskDialpadNumber(call.callTo)}</span>

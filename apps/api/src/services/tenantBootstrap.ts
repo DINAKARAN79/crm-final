@@ -91,6 +91,11 @@ export async function bootstrapTenant(
   tenantId: string,
   actorId: string,
 ): Promise<TenantBootstrapResult> {
+  await tx.bookedBucketSetting.upsert({
+    where: { tenantId },
+    create: { tenantId, isActive: false },
+    update: {},
+  });
   const adminProfile = await tx.profile.upsert({
     where: { tenantId_name: { tenantId, name: 'System Administrator' } },
     update: { isAdmin: true, isDefault: false },

@@ -386,6 +386,22 @@ describe('selectNextSequenceMember', () => {
     expect(svc.member?.userId).toBe('svc-user');
   });
 
+  it('matches tenant-configured profile names without case sensitivity', async () => {
+    const queue = salesQueue();
+    queue.members[0].user.profile.name = 'Custom Sales';
+    const tx = { rRQueue: { findFirst: vi.fn().mockResolvedValue(queue) } } as any;
+
+    const selected = await RoundRobinAssignmentService.getNextEligibleMember(
+      'queue-1',
+      'tenant-1',
+      tx,
+      'Sales',
+      ['custom sales'],
+    );
+
+    expect(selected.member?.userId).toBe('sales-user');
+  });
+
   it('selects and advances a member only from the requested project and user type', async () => {
     const queue = salesQueue();
     const tx = mockTransaction();

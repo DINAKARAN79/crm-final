@@ -104,6 +104,8 @@ export function BizcallDialpadDock() {
   const [endedSummary, setEndedSummary] = React.useState("");
   const [disposition, setDisposition] = React.useState("");
   const [dispositionNotes, setDispositionNotes] = React.useState("");
+  const [dispositionSaving, setDispositionSaving] = React.useState(false);
+  const [dispositionSaveFailed, setDispositionSaveFailed] = React.useState(false);
   const [iframeLoaded, setIframeLoaded] = React.useState(false);
   const [callState, setCallState] = React.useState("Connecting");
   const [activeCall, setActiveCall] = React.useState(false);
@@ -135,11 +137,56 @@ export function BizcallDialpadDock() {
     callUuid?: string;
     callDetailId?: string;
   } | null>(null);
+  const pendingDispositionRef = React.useRef<Parameters<typeof telephonyDialpadApi.dialpadEvent>[0] | null>(null);
+  const dispositionSavingRef = React.useRef(false);
   const activeCallTimerRef = React.useRef<number | null>(null);
   const tabIdRef = React.useRef("");
   const lockOwnerRef = React.useRef(false);
   const dockedDialpadUrl = config?.dialpadMode === "DOCKED" ? currentDialpadUrl || config.dialpadUrl : null;
   const lockEnabled = Boolean(config?.active && config.dialpadMode === "DOCKED");
+
+  const saveDisposition = React.useCallback(async (
+    body: Parameters<typeof telephonyDialpadApi.dialpadEvent>[0],
+  ) => {
+    if (dispositionSavingRef.current) return;
+    pendingDispositionRef.current = body;
+    dispositionSavingRef.current = true;
+    setDispositionSaving(true);
+    setDispositionSaveFailed(false);
+    let response: Awaited<ReturnType<typeof telephonyDialpadApi.dialpadEvent>> | null = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        response = await telephonyDialpadApi.dialpadEvent(body);
+        if (response.data?.success && response.data?.data?.callDetailId) break;
+        response = null;
+      } catch {
+        response = null;
+      }
+      if (attempt < 2) await new Promise((resolve) => window.setTimeout(resolve, 250 * (attempt + 1)));
+    }
+    dispositionSavingRef.current = false;
+    setDispositionSaving(false);
+    if (!response?.data?.success || !response.data?.data?.callDetailId) {
+      setDispositionSaveFailed(true);
+      setExpanded(true);
+      setStatusMessage("Disposition could not be saved. Retry to submit it again.");
+      return;
+    }
+    const savedDisposition = safeText(response.data.data.disposition, 120) || safeText(body.disposition, 120);
+    const savedNotes = safeText(response.data.data.notes, 2000);
+    pendingDispositionRef.current = null;
+    setDispositionSaveFailed(false);
+    setDisposition(savedDisposition);
+    setDispositionNotes(savedNotes);
+    setStatusMessage("Disposition saved");
+    toast({ title: "Disposition saved" });
+    const context = activeCallRef.current;
+    if (context?.leadId) {
+      window.dispatchEvent(new CustomEvent("crm:call-details-updated", { detail: { leadId: context.leadId } }));
+    }
+    activeCallRef.current = null;
+    window.setTimeout(() => setStatusMessage((value) => value === "Disposition saved" ? "" : value), 3000);
+  }, [toast]);
 
   const sendCommand = React.useCallback((command: DialerCommand, justLoaded = false) => {
     const useTabTarget = configRef.current?.dialpadMode === "NEW_TAB" || forceTabTargetRef.current;
@@ -672,17 +719,14 @@ export function BizcallDialpadDock() {
           setDockOpen(false);
         }
       } else if (eventName === "BIZCALL_DISPOSITION_SUBMITTED") {
-        setDisposition(safeDisposition);
-        setDispositionNotes(rawNotes);
-        setStatusMessage("Disposition saved");
-        toast({ title: "Disposition saved" });
-        window.setTimeout(() => setStatusMessage((value) => value === "Disposition saved" ? "" : value), 3000);
+        setStatusMessage("Saving disposition…");
       }
 
       if (eventName !== "BIZCALL_AGENT_REGISTERED") {
         const body = {
           event: eventName,
           ...(context?.leadId ? { leadId: context.leadId } : {}),
+          ...(context?.callDetailId ? { callDetailId: context.callDetailId } : {}),
           ...(safeCallUuid ? { callUuid: safeCallUuid } : {}),
           ...(rawNumber ? { number: rawNumber } : {}),
           ...(rawDuration !== undefined ? { duration: rawDuration } : {}),
@@ -690,12 +734,15 @@ export function BizcallDialpadDock() {
           ...(safeDisposition ? { disposition: safeDisposition } : {}),
           ...(rawNotes ? { notes: rawNotes } : {}),
         };
-        void telephonyDialpadApi.dialpadEvent(body)
-          .then(() => {
-            if (context?.leadId) window.dispatchEvent(new CustomEvent("crm:call-details-updated", { detail: { leadId: context.leadId } }));
-            if (eventName === "BIZCALL_DISPOSITION_SUBMITTED") activeCallRef.current = null;
-          })
-          .catch(() => setStatusMessage("Call event could not be saved. Refresh Call Details and try again."));
+        if (eventName === "BIZCALL_DISPOSITION_SUBMITTED") {
+          void saveDisposition(body);
+        } else {
+          void telephonyDialpadApi.dialpadEvent(body)
+            .then(() => {
+              if (context?.leadId) window.dispatchEvent(new CustomEvent("crm:call-details-updated", { detail: { leadId: context.leadId } }));
+            })
+            .catch(() => setStatusMessage("Call event could not be saved. Refresh Call Details and try again."));
+        }
       } else {
         void telephonyDialpadApi.dialpadEvent({
           event: eventName,
@@ -706,7 +753,7 @@ export function BizcallDialpadDock() {
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [callState, config, iframeGeneration, ownsLock, showOnPage, tenantId, toast, user?.id]);
+  }, [callState, config, iframeGeneration, ownsLock, saveDisposition, showOnPage, tenantId, toast, user?.id]);
 
   const resetDialpad = () => {
     if (activeCall) {
@@ -916,6 +963,9 @@ export function BizcallDialpadDock() {
         </div>
       )}
       {endedSummary && <div className="border-b bg-slate-50 px-3 py-2 text-xs dark:bg-slate-800">Call ended · {endedSummary}</div>}
+      {dispositionSaving ? (
+        <div className="border-b px-3 py-2 text-xs text-muted-foreground" role="status">Saving disposition…</div>
+      ) : null}
       {disposition && (
         <div className="border-b px-3 py-2 text-xs text-muted-foreground">
           Disposition saved · {disposition}{dispositionNotes ? " · Notes saved" : ""}
@@ -930,6 +980,17 @@ export function BizcallDialpadDock() {
         {statusMessage ? (
           <div className="flex items-center justify-between gap-2 bg-amber-50 px-3 py-2 text-xs text-amber-900">
             <span>{statusMessage}</span>
+            {dispositionSaveFailed && pendingDispositionRef.current ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={dispositionSaving}
+                onClick={() => pendingDispositionRef.current && void saveDisposition(pendingDispositionRef.current)}
+              >
+                Retry
+              </Button>
+            ) : null}
           </div>
         ) : null}
         {busy ? <p className="px-3 py-1 text-xs text-muted-foreground">Preparing call…</p> : null}

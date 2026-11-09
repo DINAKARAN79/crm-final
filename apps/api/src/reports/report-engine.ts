@@ -1,5 +1,6 @@
 import { prisma } from "@dct-crm/db";
-import { crmDateToUtcStart, getCRMDayBounds } from "@dct-crm/shared";
+import { getTenantTimezone } from "../services/tenantTimezone";
+import { DEFAULT_CRM_TIMEZONE, crmDateToUtcStart } from "@dct-crm/shared";
 import { REPORT_OBJECTS, ReportField, reportObjectFromPrismaModel } from "./report-metadata";
 
 export type AggregateFunction =
@@ -42,13 +43,13 @@ function isVirtualReportColumn(column: string): boolean {
   return virtualReportColumns.has(column);
 }
 
-function parseDateValue(value: unknown): Date | null {
+function parseDateValue(value: unknown, timeZone = DEFAULT_CRM_TIMEZONE): Date | null {
   if (value == null || value === "") {
     return null;
   }
 
   const raw = String(value);
-  const date = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? crmDateToUtcStart(raw) : new Date(raw);
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? crmDateToUtcStart(raw, timeZone) : new Date(raw);
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
@@ -333,10 +334,17 @@ const relativeDateOperators = new Set([
 function dateRange(
   operator: string,
   now = new Date(),
+  timeZone = DEFAULT_CRM_TIMEZONE,
 ): { gte: Date; lt: Date } {
-  const start = getCRMDayBounds(now).start;
-
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now).map((part) => [part.type, part.value]));
+  const start = new Date(Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day)));
   const end = new Date(start);
+  end.setUTCDate(end.getUTCDate() + 1);
 
   switch (operator) {
     case "today":
@@ -380,40 +388,44 @@ function dateRange(
     }
 
     case "thisMonth":
-      end.setUTCMonth(end.getUTCMonth() + 1, 1);
+      start.setUTCDate(1);
+      end.setTime(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1));
       break;
 
     case "lastMonth":
-      start.setUTCMonth(start.getUTCMonth() - 1, 1);
-      end.setTime(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1) - 330 * 60 * 1000);
+      start.setUTCDate(1);
+      start.setUTCMonth(start.getUTCMonth() - 1);
+      end.setTime(Date.UTC(Number(parts.year), Number(parts.month) - 1, 1));
       break;
 
     case "nextMonth":
-      start.setUTCMonth(start.getUTCMonth() + 1, 1);
-      end.setTime(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1) - 330 * 60 * 1000);
+      start.setUTCDate(1);
+      start.setUTCMonth(start.getUTCMonth() + 1);
+      end.setTime(new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1)).getTime());
       break;
 
     case "thisQuarter": {
       const quarterStart = Math.floor(start.getUTCMonth() / 3) * 3;
       start.setUTCMonth(quarterStart, 1);
-      end.setTime(Date.UTC(start.getUTCFullYear(), quarterStart + 3, 1) - 330 * 60 * 1000);
+      end.setTime(Date.UTC(start.getUTCFullYear(), quarterStart + 3, 1));
       break;
     }
 
     case "lastQuarter": {
       const quarterStart = Math.floor(start.getUTCMonth() / 3) * 3 - 3;
       start.setUTCMonth(quarterStart, 1);
-      end.setTime(Date.UTC(start.getUTCFullYear(), quarterStart + 3, 1) - 330 * 60 * 1000);
+      end.setTime(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 3, 1));
       break;
     }
 
     case "thisYear":
-      end.setUTCFullYear(end.getUTCFullYear() + 1, 0, 1);
+      start.setUTCMonth(0, 1);
+      end.setTime(Date.UTC(start.getUTCFullYear() + 1, 0, 1));
       break;
 
     case "lastYear":
       start.setUTCFullYear(start.getUTCFullYear() - 1, 0, 1);
-      end.setTime(Date.UTC(start.getUTCFullYear() + 1, 0, 1) - 330 * 60 * 1000);
+      end.setTime(Date.UTC(Number(parts.year), 0, 1));
       break;
 
     case "last90Days":
@@ -422,7 +434,10 @@ function dateRange(
       break;
   }
 
-  return { gte: start, lt: end };
+  return {
+    gte: crmDateToUtcStart(start.toISOString().slice(0, 10), timeZone),
+    lt: crmDateToUtcStart(end.toISOString().slice(0, 10), timeZone),
+  };
 }
 
 function getNestedValue(source: unknown, path: string): unknown {
@@ -504,7 +519,7 @@ function addSelectPath(select: Record<string, any>, path: string) {
   current[parts[parts.length - 1]] = true;
 }
 
-function convertValue(value: unknown, field: ReportField) {
+function convertValue(value: unknown, field: ReportField, timeZone = DEFAULT_CRM_TIMEZONE) {
   if (value === undefined || value === null || value === "") {
     return value;
   }
@@ -514,7 +529,7 @@ function convertValue(value: unknown, field: ReportField) {
       return Number(value);
 
     case "date":
-      return new Date(String(value));
+      return parseDateValue(value, timeZone);
 
     case "enum":
       return String(value);
@@ -528,15 +543,16 @@ export function createCondition(
   field: ReportField,
   operator: string,
   value: unknown,
+  timeZone = DEFAULT_CRM_TIMEZONE,
 ) {
   if (field.type === "date" && relativeDateOperators.has(operator)) {
-    return dateRange(operator);
+    return dateRange(operator, new Date(), timeZone);
   }
 
   if (field.type === "date" && operator === "customRange") {
     const range = value && typeof value === "object" ? value as Record<string, unknown> : null;
-    const start = parseDateValue(range?.start);
-    const end = parseDateValue(range?.end);
+    const start = parseDateValue(range?.start, timeZone);
+    let end = parseDateValue(range?.end, timeZone);
 
     if (!start || !end) {
       throw new Error("Custom date range requires valid start and end values");
@@ -544,6 +560,11 @@ export function createCondition(
 
     if (start.getTime() > end.getTime()) {
       throw new Error("Custom date range start must be before end");
+    }
+    if (typeof range?.end === "string" && /^\d{4}-\d{2}-\d{2}$/.test(range.end)) {
+      const nextDate = new Date(`${range.end}T00:00:00.000Z`);
+      nextDate.setUTCDate(nextDate.getUTCDate() + 1);
+      end = crmDateToUtcStart(nextDate.toISOString().slice(0, 10), timeZone);
     }
 
     return {
@@ -558,7 +579,7 @@ export function createCondition(
     }
   }
 
-  const convertedValue = convertValue(value, field);
+  const convertedValue = convertValue(value, field, timeZone);
   const isStringLike = field.type === "string" || field.type === "enum";
   const stringOnlyOperators = new Set([
     "contains",
@@ -651,6 +672,7 @@ function buildWhere(
   filterTree?: FilterTree,
   showMe: "all" | "mine" = "all",
   userId?: string,
+  timeZone = DEFAULT_CRM_TIMEZONE,
 ) {
   const validFilters = filters.filter((filter) => {
     const field = objectConfig.fields[filter.field];
@@ -681,7 +703,7 @@ function buildWhere(
       throw new Error(`${field.label} is calculated and cannot be filtered`);
     }
     if (field.path === 'Area__c') {
-      const condition = createCondition(field, filter.operator, filter.value);
+      const condition = createCondition(field, filter.operator, filter.value, timeZone);
       const jsonFilter = condition !== null && typeof condition === 'object' && !Array.isArray(condition)
         ? { path: ['Area__c'], ...condition }
         : { path: ['Area__c'], equals: condition };
@@ -709,7 +731,7 @@ function buildWhere(
         ],
       };
     }
-    return buildNestedObject(field.path, createCondition(field, filter.operator, filter.value));
+    return buildNestedObject(field.path, createCondition(field, filter.operator, filter.value, timeZone));
   };
 
   const buildTreeWhere = (node: FilterTree): Record<string, unknown> => {
@@ -1055,6 +1077,7 @@ function groupValue(
   fieldNames: string[],
   objectConfig: { fields: Record<string, ReportField> },
   groupOptions: Record<string, { dateBucket?: string }> = {},
+  timeZone = DEFAULT_CRM_TIMEZONE,
 ) {
   const values: Record<string, string> = {};
 
@@ -1075,7 +1098,7 @@ function groupValue(
       if (!Number.isNaN(date.getTime())) {
         const bucket = groupOptions[fieldName]?.dateBucket || "day";
         const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
-          timeZone: "Asia/Kolkata",
+          timeZone,
           year: "numeric",
           month: "2-digit",
           day: "2-digit",
@@ -1085,7 +1108,7 @@ function groupValue(
         const day = Number(parts.day);
         if (bucket === "year") values[fieldName] = String(year);
         else if (bucket === "quarter") values[fieldName] = `Q${Math.floor(month / 3) + 1} ${year}`;
-        else if (bucket === "month") values[fieldName] = new Intl.DateTimeFormat("en", { month: "long", year: "numeric", timeZone: "Asia/Kolkata" }).format(date);
+        else if (bucket === "month") values[fieldName] = new Intl.DateTimeFormat("en", { month: "long", year: "numeric", timeZone }).format(date);
         else if (bucket === "week") {
           const start = new Date(Date.UTC(year, month, day));
           start.setUTCDate(start.getUTCDate() - ((start.getUTCDay() + 6) % 7));
@@ -1175,6 +1198,7 @@ export function canAccessReportFolderForUser(
 
 export async function runReport(input: RunReportInput) {
   validateReportRequest(input);
+  const timeZone = await getTenantTimezone(input.tenantId);
 
   const rowGroups = input.rowGroups?.length
     ? [...input.rowGroups]
@@ -1352,6 +1376,7 @@ export async function runReport(input: RunReportInput) {
           input.filterTree,
           input.showMe || "all",
           input.userId,
+          timeZone,
         ),
         input.objectName,
         input.crossFilter,
@@ -1449,7 +1474,7 @@ export async function runReport(input: RunReportInput) {
     >();
 
     for (const record of workingRecords) {
-      const values = groupValue(record, rowGroups, objectConfig, groupOptions);
+      const values = groupValue(record, rowGroups, objectConfig, groupOptions, timeZone);
       const key = groupKey(values, rowGroups);
       const existing = allGroups.get(key);
 
@@ -1472,7 +1497,7 @@ export async function runReport(input: RunReportInput) {
     const previewRecordsByGroup = new Map<string, any[]>();
 
     for (const record of limitedRecords) {
-      const values = groupValue(record, rowGroups, objectConfig, groupOptions);
+      const values = groupValue(record, rowGroups, objectConfig, groupOptions, timeZone);
       const key = groupKey(values, rowGroups);
       const list = previewRecordsByGroup.get(key) || [];
       list.push(record);
@@ -1496,7 +1521,7 @@ export async function runReport(input: RunReportInput) {
     }));
 
     groupedDetailRows = limitedRecords.map((record: any) => {
-      const values = groupValue(record, rowGroups, objectConfig, groupOptions);
+      const values = groupValue(record, rowGroups, objectConfig, groupOptions, timeZone);
       const key = groupKey(values, rowGroups);
       const counts: Record<string, number> = {};
       const totalCount = groupCountsByKey.get(key) || 0;
@@ -1541,7 +1566,7 @@ export async function runReport(input: RunReportInput) {
     >();
 
     for (const record of workingRecords) {
-      const values = groupValue(record, columnGroups, objectConfig, groupOptions);
+      const values = groupValue(record, columnGroups, objectConfig, groupOptions, timeZone);
       const key = groupKey(values, columnGroups);
 
       if (!distinctColumnGroups.has(key)) {
@@ -1553,7 +1578,7 @@ export async function runReport(input: RunReportInput) {
 
     for (const [key, groupValues] of distinctColumnGroups) {
       const count = workingRecords.filter((record: any) => {
-        const current = groupValue(record, columnGroups, objectConfig, groupOptions);
+        const current = groupValue(record, columnGroups, objectConfig, groupOptions, timeZone);
         return groupKey(current, columnGroups) === key;
       }).length;
 
@@ -1574,8 +1599,8 @@ export async function runReport(input: RunReportInput) {
       >();
 
       for (const record of workingRecords) {
-        const rowValues = groupValue(record, rowGroups, objectConfig, groupOptions);
-        const columnValues = groupValue(record, columnGroups, objectConfig, groupOptions);
+        const rowValues = groupValue(record, rowGroups, objectConfig, groupOptions, timeZone);
+        const columnValues = groupValue(record, columnGroups, objectConfig, groupOptions, timeZone);
 
         const rowKey = groupKey(rowValues, rowGroups);
         const columnKey = groupKey(columnValues, columnGroups);

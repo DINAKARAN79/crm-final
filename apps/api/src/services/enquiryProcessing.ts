@@ -3,6 +3,7 @@ import { leadCreateSchema } from '@dct-crm/shared';
 import { prisma } from '@dct-crm/db';
 import { getNextSiteVisitNumber } from './leadWorkflowExtras';
 import { createOwnerHistory } from './ownerHistory';
+import { moveLeadToBookedBucket } from './bookedBucket';
 import {
   acquireLeadDuplicateLocks,
   duplicateLeadFields,
@@ -20,6 +21,7 @@ import {
   findApplicableRRQueue,
   isLeadEligibleForAutoAssignment,
   RoundRobinAssignmentService,
+  type RRMemberUserType,
 } from './rrQueue';
 import { createEnquiryInTransaction, createEnquiryInTransactionWithStatus } from './enquiryService';
 import { extractEnquiryAttributes } from './enquiryFieldMap';
@@ -72,6 +74,15 @@ export interface LeadEnquiryInput {
   salesUserId?: string;
   profileName?: string | null;
   expectedLeadId?: string;
+  importAssignment?: {
+    status: string;
+    fallbackOwnerId: string;
+    importJobId: string;
+    ownerId?: string;
+    userType?: RRMemberUserType;
+    profileNames?: string[];
+  };
+  bookedBucketSource?: 'import';
   lead: LeadCreateData;
   enquiry: EnquiryMetadata;
   siteVisit?: { projectId?: string; scheduledAt: Date; notes?: string };
@@ -260,12 +271,19 @@ export async function processLeadEnquiry(
       }
     }
 
-    const selectedOwner = input.salesUserId
+    const importOwnerId = input.importAssignment?.ownerId || input.importAssignment?.fallbackOwnerId;
+    const selectedOwner = importOwnerId
+      ? await tx.user.findFirst({
+          where: { id: importOwnerId, tenantId: input.tenantId, isActive: true },
+          select: { id: true, profile: { select: { name: true } } },
+        })
+      : input.salesUserId
       ? await tx.user.findFirst({
           where: { id: input.salesUserId, tenantId: input.tenantId, isActive: true },
           select: { id: true, profile: { select: { name: true } } },
         })
       : null;
+    if (input.importAssignment && !selectedOwner) throw new Error('IMPORT_OWNER_INVALID');
     if (input.salesUserId && !/^sales(?:\b|$)/i.test(selectedOwner?.profile?.name || '')) {
       throw new Error('SALES_USER_INVALID');
     }
@@ -755,7 +773,7 @@ export async function processLeadEnquiry(
         firstSubSource: metadata.subSource,
         lastSubSource: metadata.subSource,
         lastCampaign: input.lead.lastCampaign || metadata.subCampaign || metadata.campaign,
-        status: 'NEW',
+        status: (input.importAssignment?.status || 'NEW') as Prisma.LeadCreateInput['status'],
         rating: input.lead.rating || undefined,
         leadInterest: input.lead.leadInterest || undefined,
         description: input.lead.description || undefined,
@@ -768,9 +786,10 @@ export async function processLeadEnquiry(
         budget: input.lead.budget || undefined,
         ownerId,
         projectId: input.lead.projectId || undefined,
+        importJobId: input.importAssignment?.importJobId,
         customFields: mergeOperationalLeadCustomFields(input.lead.customFields, {
           source,
-          status: 'NEW',
+          status: input.importAssignment?.status || 'NEW',
           rating: input.lead.rating || null,
           description: input.lead.description || null,
           score: input.lead.score ?? 0,
@@ -808,13 +827,43 @@ export async function processLeadEnquiry(
       previousProfile: null,
       newProfile: ownerProfileName,
       previousStatus: null,
-      newStatus: 'NEW',
-      handoffReason: 'Lead Created',
+      newStatus: input.importAssignment?.status || 'NEW',
+      handoffReason: input.importAssignment
+        ? `Imported with status ${input.importAssignment.status}`
+        : 'Lead Created',
       changedById: input.userId,
     }, tx);
     let assignment: unknown = null;
     let assignmentWarning: string | undefined;
-    if (!input.salesUserId) {
+    const isBookedStatus = newLead.status === 'BOOKED';
+    const isBookedImport = input.importAssignment?.status.toUpperCase() === 'BOOKED'
+      || (input.bookedBucketSource === 'import' && isBookedStatus);
+    if (input.importAssignment) {
+      if (!isBookedStatus && !input.importAssignment.ownerId && input.importAssignment.userType && newLead.projectId) {
+        try {
+          assignment = await assignLeadToProjectRoundRobinInTransaction(tx, {
+            tenantId: input.tenantId,
+            leadId: newLead.id,
+            projectId: newLead.projectId,
+            userType: input.importAssignment.userType,
+            actorId: input.userId,
+            reason: `Imported lead assigned by ${input.importAssignment.userType} round robin`,
+            profileNames: input.importAssignment.profileNames,
+          });
+        } catch (error) {
+          if (
+            error instanceof Error &&
+            (error.message.startsWith('RR_QUEUE_NOT_CONFIGURED:')
+              || error.message.startsWith('NO_ELIGIBLE_RR_MEMBER:')
+              || error.message === 'RR_PROJECT_REQUIRED')
+          ) {
+            assignmentWarning = 'No eligible project round-robin member was available; the lead remains assigned to the tenant administrator fallback.';
+          } else {
+            throw error;
+          }
+        }
+      }
+    } else if (!input.salesUserId && !isBookedStatus) {
       try {
         assignment = await assignLeadToProjectRoundRobinInTransaction(tx, {
           tenantId: input.tenantId,
@@ -837,6 +886,14 @@ export async function processLeadEnquiry(
         }
         assignmentWarning = 'There is no eligible Sales user (Pre Sales) available; the lead remains assigned to its current owner.';
       }
+    }
+    if (isBookedStatus) {
+      await moveLeadToBookedBucket(
+        newLead.id,
+        isBookedImport ? 'import' : input.bookedBucketSource || 'api',
+        tx,
+        input.userId,
+      );
     }
     const assignedLead = await tx.lead.findUniqueOrThrow({
       where: { id: newLead.id },

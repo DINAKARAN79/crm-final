@@ -3,11 +3,20 @@ import {
   buildMappedImportRows,
   getCsvColumns,
   parseCsvPreview,
+  parseCsvPreviewAsync,
   serializeCsv,
   suggestCsvFieldMappings,
 } from "./data-import-csv";
 
 describe("parseCsvPreview", () => {
+  it("parses asynchronously without changing CSV semantics and supports cancellation", async () => {
+    await expect(parseCsvPreviewAsync('name,notes\r\nDana,"first\nsecond"')).resolves.toEqual({
+      rows: [["name", "notes"], ["Dana", "first\nsecond"]],
+      error: "",
+    });
+    await expect(parseCsvPreviewAsync("name\nDana", () => false)).resolves.toBeNull();
+  });
+
   it("parses quoted commas, escaped quotes, and CRLF rows", () => {
     expect(parseCsvPreview('\uFEFFname,company\r\n"Dana, DCT","He said ""hello"""')).toEqual({
       rows: [["name", "company"], ["Dana, DCT", 'He said "hello"']],

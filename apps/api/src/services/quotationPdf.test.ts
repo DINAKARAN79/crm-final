@@ -46,9 +46,9 @@ const quotation = {
   totalPrice: 1015000,
   paymentPlanName: 'Construction linked',
   installments: [
-    { milestone: 'On confirmation', percentage: 10, dueMonths: 0 },
-    { milestone: 'On foundation', percentage: 25, dueMonths: 2 },
-    { milestone: 'On possession', percentage: 65, dueMonths: 12 },
+    { milestone: 'On confirmation', percentage: 10, dueDays: 0 },
+    { milestone: 'On foundation', percentage: 25, dueDays: 60 },
+    { milestone: 'On possession', percentage: 65, dueDays: 365 },
   ],
   terms: 'Prices follow the saved quotation. This note is optional.',
   preparedBy: 'System Admin',
@@ -105,6 +105,43 @@ describe('quotation PDF data', () => {
     expect(pages.length).toBeLessThan(4);
   });
 
+  it('renders the quotation date in the configured tenant timezone', async () => {
+    const pdf = await renderQuotationPdf({
+      ...quotation,
+      quotationDate: new Date('2026-10-17T01:00:00.000Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+
+    expect(pageText(pdf).join(' ')).toContain('16 Oct 2026');
+  });
+
+  it('shows day-based payment timing and clearly excludes unconfigured taxes', async () => {
+    const pdf = await renderQuotationPdf({
+      ...quotation,
+      installments: [
+        { milestone: 'Booking token', percentage: 10, dueDays: 0 },
+        { milestone: 'Registration', percentage: 90, dueDays: 60 },
+      ],
+    });
+
+    const text = pageText(pdf).join(' ');
+    expect(text).toContain('After 60 days');
+    expect(text).toContain('No tax configuration is available');
+    expect(text).toContain('Not included');
+  });
+
+  it('continues to render historical month-based installment snapshots', async () => {
+    const pdf = await renderQuotationPdf({
+      ...quotation,
+      installments: [
+        { milestone: 'Booking token', percentage: 10, dueMonths: 0 },
+        { milestone: 'Registration', percentage: 90, dueMonths: 2 },
+      ],
+    });
+
+    expect(pageText(pdf).join(' ')).toContain('After 2 months');
+  });
+
   it('keeps the payment schedule heading on the same page as its rows', async () => {
     const pdf = await renderQuotationPdf({
       ...quotation,
@@ -113,8 +150,8 @@ describe('quotation PDF data', () => {
       unitNumber: 'DCTParadise-U004',
       area: 1200,
       installments: [
-        { milestone: 'Booking token', percentage: 10, dueMonths: 0 },
-        { milestone: 'Registration', percentage: 90, dueMonths: 0 },
+        { milestone: 'Booking token', percentage: 10, dueDays: 0 },
+        { milestone: 'Registration', percentage: 90, dueDays: 0 },
       ],
     });
     const schedulePage = pageText(pdf).find((page) => page.includes('Payment schedule'));

@@ -7,6 +7,7 @@ const database = vi.hoisted(() => ({
   leadUpdate: vi.fn(),
   leadFindFirst: vi.fn(),
   leadFindMany: vi.fn(),
+  leadCount: vi.fn(),
   leadFindUnique: vi.fn(),
   projectFindFirst: vi.fn(),
   objectDefinitionFindFirst: vi.fn(),
@@ -22,6 +23,7 @@ const database = vi.hoisted(() => ({
   pageLayoutCreate: vi.fn(),
   pageLayoutUpdate: vi.fn(),
   auditLogCreate: vi.fn(),
+  auditLogFindFirst: vi.fn(),
   sequenceUpsert: vi.fn(),
   transaction: vi.fn(),
 }));
@@ -38,6 +40,7 @@ vi.mock('@dct-crm/db', () => ({
       update: database.leadUpdate,
       findFirst: database.leadFindFirst,
       findMany: database.leadFindMany,
+      count: database.leadCount,
       findUnique: database.leadFindUnique,
     },
     objectDefinition: {
@@ -60,6 +63,7 @@ vi.mock('@dct-crm/db', () => ({
       create: database.pageLayoutCreate,
       update: database.pageLayoutUpdate,
     },
+    auditLog: { findFirst: database.auditLogFindFirst },
     project: { findFirst: database.projectFindFirst },
     $transaction: database.transaction,
   },
@@ -98,7 +102,7 @@ vi.mock('../services/workflow', () => ({
 
 vi.mock('../services/ownerHistory', () => ({
   createOwnerHistory: vi.fn(),
-  getOwnerHistory: vi.fn(),
+  getOwnerHistory: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock('../services/recordAccess', () => ({
@@ -109,7 +113,19 @@ vi.mock('../services/recordAccess', () => ({
 
 vi.mock('../services/leadWorkflowExtras', () => ({
   getNextSiteVisitNumber: vi.fn(),
+  normalizeOverdueFollowUps: vi.fn(),
   normalizeOverdueSiteVisits: vi.fn(),
+}));
+vi.mock('../services/leadStatusSettings', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../services/leadStatusSettings')>();
+  return {
+    ...actual,
+    decorateLeadStatus: vi.fn((_tenantId: string, lead: unknown) => lead),
+    decorateLeads: vi.fn((leads: unknown[]) => leads),
+  };
+});
+vi.mock('../services/tenantTimezone', () => ({
+  getTenantTimezone: vi.fn().mockResolvedValue('UTC'),
 }));
 
 vi.mock('../services/rrQueue', () => ({
@@ -164,6 +180,41 @@ async function pushLeadToSVC(body: Record<string, unknown>) {
   });
 }
 
+async function updateLead(body: Record<string, unknown>) {
+  const app = express();
+  app.use(express.json());
+  app.use('/api/leads', leadsRouter);
+  const server = app.listen(0);
+  servers.push(server);
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Expected a TCP server address');
+  return fetch(`http://127.0.0.1:${address.port}/api/leads/lead-a`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+async function getLead(identifier: string) {
+  const app = express();
+  app.use('/api/leads', leadsRouter);
+  const server = app.listen(0);
+  servers.push(server);
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Expected a TCP server address');
+  return fetch(`http://127.0.0.1:${address.port}/api/leads/${encodeURIComponent(identifier)}`);
+}
+
+async function getLeadList() {
+  const app = express();
+  app.use('/api/leads', leadsRouter);
+  const server = app.listen(0);
+  servers.push(server);
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Expected a TCP server address');
+  return fetch(`http://127.0.0.1:${address.port}/api/leads?page=1&limit=20`);
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   database.leadFindFirst.mockResolvedValue({
@@ -194,7 +245,9 @@ beforeEach(() => {
   database.pageLayoutCreate.mockResolvedValue({ id: 'lead-layout-a' });
   database.pageLayoutUpdate.mockResolvedValue({});
   database.auditLogCreate.mockResolvedValue({});
+  database.auditLogFindFirst.mockResolvedValue(null);
   database.leadFindMany.mockResolvedValue([]);
+  database.leadCount.mockResolvedValue(1);
   rrQueue.assignLeadInTransaction.mockResolvedValue({ assignedUserId: 'svc-member-a' });
   database.transaction.mockImplementation((callback: (tx: unknown) => Promise<unknown>) =>
     callback({
@@ -226,7 +279,7 @@ beforeEach(() => {
         update: database.pageLayoutUpdate,
       },
       sequence: { upsert: database.sequenceUpsert },
-      auditLog: { create: database.auditLogCreate },
+      auditLog: { create: database.auditLogCreate, findFirst: database.auditLogFindFirst },
       project: { findFirst: database.projectFindFirst },
       enquiry: {
         findFirst: vi.fn().mockResolvedValue(null),
@@ -246,6 +299,80 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve, reject) => {
     server.close((error) => error ? reject(error) : resolve());
   })));
+});
+
+describe('GET /api/leads/:id', () => {
+  it('resolves a public Lead Number and returns the canonical lead record', async () => {
+    const storedLead = {
+      id: 'lead-a',
+      leadNumber: 'LN000001',
+      tenantId: 'tenant-a',
+      ownerId: 'svc-a',
+      creatorId: null,
+      status: 'PROSPECT',
+      siteVisits: [],
+      auditLogs: [],
+    };
+    database.leadFindFirst.mockImplementation(async ({ where }: { where: Record<string, unknown> }) =>
+      where.leadNumber === 'LN000001' ? storedLead : null,
+    );
+
+    const response = await getLead('LN000001');
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      success: true,
+      data: { id: 'lead-a', leadNumber: 'LN000001' },
+    });
+    expect(database.leadFindFirst).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ where: { id: 'LN000001', tenantId: 'tenant-a' } }),
+    );
+    expect(database.leadFindFirst).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ where: { leadNumber: 'LN000001', tenantId: 'tenant-a' } }),
+    );
+  });
+});
+
+describe('GET /api/leads', () => {
+  it('selects only available list fields when newer Lead columns are not migrated yet', async () => {
+    database.leadFindMany.mockResolvedValue([{
+      id: 'lead-a',
+      tenantId: 'tenant-a',
+      ownerId: 'svc-a',
+      leadNumber: 'LN000001',
+      firstName: 'Test',
+      lastName: 'Lead',
+      company: null,
+      email: null,
+      phone: '9876543210',
+      countryCode: '91',
+      source: 'WEBSITE',
+      leadInterest: null,
+      status: 'PROSPECT',
+      rating: null,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+      owner: null,
+      project: null,
+      bookings: [],
+      _count: { siteVisits: 0, activities: 0 },
+    }]);
+
+    const response = await getLeadList();
+    const query = database.leadFindMany.mock.calls[0][0];
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      success: true,
+      data: [{ id: 'lead-a', leadNumber: 'LN000001' }],
+      pagination: { total: 1 },
+    });
+    expect(query.select).toBeDefined();
+    expect(query.select.bookedBy).toBeUndefined();
+    expect(query.include).toBeUndefined();
+  });
 });
 
 describe('POST /api/leads/:id/push-to-svc request validation', () => {
@@ -418,6 +545,20 @@ describe('POST /api/leads/:id/push-to-svc request validation', () => {
 
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ success: false, error: 'Project must belong to this company' });
+    expect(database.transaction).not.toHaveBeenCalled();
+  });
+});
+
+describe('PUT /api/leads/:id owner protection', () => {
+  it('rejects owner changes through the generic edit route', async () => {
+    const response = await updateLead({ ownerId: 'other-user' });
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({
+      success: false,
+      error: 'Use the lead assignment action to change the owner.',
+    });
+    expect(database.leadUpdate).not.toHaveBeenCalled();
     expect(database.transaction).not.toHaveBeenCalled();
   });
 });

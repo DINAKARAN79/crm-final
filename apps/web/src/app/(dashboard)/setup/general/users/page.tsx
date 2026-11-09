@@ -91,6 +91,7 @@ import {
 } from "@/contexts/auth-context";
 
 import { normalizeUserPhone } from "@dct-crm/shared";
+import { buildRoleHierarchyOptions } from "@/lib/role-hierarchy";
 
 import {
   Plus,
@@ -126,6 +127,7 @@ interface RoleOption {
   name: string;
   description?: string | null;
   parentRoleId?: string | null;
+  depth: number;
 }
 
 interface PermissionSet {
@@ -557,7 +559,7 @@ export default function UsersPage() {
     React.useCallback(async () => {
       const [profilesResult, rolesResult] = await Promise.allSettled([
         profileApi.list({ limit: 200 }),
-        roleApi.list({ limit: 200 }),
+        roleApi.list({ limit: 200, page: 1 }),
       ]);
 
       if (profilesResult.status === "fulfilled") {
@@ -571,14 +573,30 @@ export default function UsersPage() {
       }
 
       if (rolesResult.status === "fulfilled") {
-        setAvailableRoles(
-          getResponseData(rolesResult.value).map((role: any) => ({
-            id: role.id,
-            name: role.name,
-            description: role.description || null,
-            parentRoleId: role.parentRoleId || null,
-          }))
-        );
+        try {
+          const firstPage = getResponseData(rolesResult.value);
+          const totalPages = Number(rolesResult.value?.data?.pagination?.totalPages) || 1;
+          const remainingPages = await Promise.all(
+            Array.from({ length: Math.max(0, totalPages - 1) }, (_, index) =>
+              roleApi.list({ limit: 200, page: index + 2 }),
+            ),
+          );
+          setAvailableRoles(
+            buildRoleHierarchyOptions([...firstPage, ...remainingPages.flatMap(getResponseData)]).map((role: any) => ({
+              id: role.id,
+              name: role.name,
+              description: role.description || null,
+              parentRoleId: role.parentRoleId || null,
+              depth: role.depth,
+            }))
+          );
+        } catch {
+          toast({
+            title: "Warning",
+            description: "Some role options could not be loaded",
+            variant: "destructive" as any,
+          });
+        }
       }
 
       if (profilesResult.status === "rejected" || rolesResult.status === "rejected") {
@@ -708,7 +726,7 @@ export default function UsersPage() {
       formData.name.trim();
 
     const email =
-      formData.email.trim();
+      formData.email.trim().toLowerCase();
 
     if (!name) {
       toast({
@@ -811,6 +829,7 @@ export default function UsersPage() {
         await userApi.update(
           selectedUser.id,
           {
+            email,
             firstName,
 
             lastName,
@@ -2129,10 +2148,6 @@ export default function UsersPage() {
                   value={
                     formData.email
                   }
-                  disabled={
-                    dialogMode ===
-                    "edit"
-                  }
                   onChange={(event) =>
                     setFormData(
                       (current) => ({
@@ -2290,7 +2305,10 @@ export default function UsersPage() {
                             role.id
                           }
                         >
-                          {role.name}
+                          <span style={{ paddingLeft: role.depth * 12 }}>
+                            {role.depth > 0 ? "↳ " : ""}
+                            {role.name}
+                          </span>
                         </SelectItem>
                       )
                     )}

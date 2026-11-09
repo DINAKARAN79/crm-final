@@ -13,6 +13,7 @@ import { layoutSectionsForForm } from "@dct-crm/shared";
 import { useAuth } from "@/contexts/auth-context";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { CurrencyInput } from "@/components/ui/currency-input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
@@ -335,9 +336,8 @@ export default function LayoutDrivenForm({
 
       case "currency":
         return (
-          <Input
-            type="number"
-            value={value || ""}
+          <CurrencyInput
+            value={value ?? ""}
             onChange={(e) => handleFieldChange(field.name, e.target.value ? Number(e.target.value) : null)}
             disabled={isDisabled}
             min={field.minValue || 0}

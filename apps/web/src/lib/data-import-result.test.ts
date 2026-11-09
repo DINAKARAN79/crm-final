@@ -96,4 +96,25 @@ describe("summarizeImportResult", () => {
       description: "No records were imported. Name is required",
     });
   });
+
+  it("uses update language for Lead data updates", () => {
+    expect(summarizeImportResult("Lead", {
+      success: true,
+      data: { count: 2, errors: [] },
+    }, "update")).toEqual({
+      kind: "success",
+      title: "Data updated successfully",
+      description: "Updated 2 Leads.",
+    });
+  });
+
+  it("summarizes ID-keyed Lead upserts as creates and updates", () => {
+    expect(summarizeImportResult("Lead", {
+      success: true,
+      data: { count: 3, created: 1, updated: 2, errors: [] },
+    }, "update")).toMatchObject({
+      kind: "success",
+      description: "Upserted 3 Leads: 1 created and 2 updated.",
+    });
+  });
 });

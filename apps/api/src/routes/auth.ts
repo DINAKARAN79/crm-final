@@ -125,7 +125,7 @@ router.post('/login', loginLimiter, async (req: Request, res: Response) => {
     const users = await prisma.user.findMany({
       where: { email: normalizedEmail, isActive: true },
       include: {
-        tenant: { select: { id: true, name: true, slug: true, isActive: true, companyStartDate: true, companyExpiryDate: true } },
+        tenant: { select: { id: true, name: true, slug: true, timezone: true, isActive: true, companyStartDate: true, companyExpiryDate: true } },
         profile: { select: { id: true, name: true, description: true, isAdmin: true, leadStatusAccess: true } },
         roles: {
           include: {
@@ -590,7 +590,7 @@ router.get('/me', authenticate, async (req: AuthRequest, res: Response) => {
         phone: true,
         avatar: true,
         isSuperAdmin: true,
-        tenant: { select: { id: true, name: true, slug: true, logo: true, country: true, companyStartDate: true, companyExpiryDate: true, isActive: true } },
+        tenant: { select: { id: true, name: true, slug: true, logo: true, country: true, timezone: true, companyStartDate: true, companyExpiryDate: true, isActive: true } },
         profile: { select: { id: true, name: true, description: true, isAdmin: true, leadStatusAccess: true } },
         roles: {
           include: {

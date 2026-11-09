@@ -1,8 +1,7 @@
 "use client";
 
-import { formatDate, formatDateTime } from "@/lib/date-format";
+import { dateTimeInputValue, formatDate, formatDateTime, getTenantTimezone } from "@/lib/date-format";
 import {
-  crmDateTimeInputValue,
   crmLocalDateTimeToDate,
   PROSPECT_BEDROOM_OPTIONS,
   PROSPECT_BUDGET_OPTIONS,
@@ -66,7 +65,6 @@ import LeadActivityHistoryCard from "@/components/crm/lead-activity-history-card
 import { LeadBookings } from "@/components/crm/lead-bookings";
 import { LeadQuotations } from "@/components/crm/lead-quotations";
 import { LeadReceipts } from "@/components/crm/lead-receipts";
-import { LeadInstallments } from "@/components/crm/lead-installments";
 import StickyNotesCard from "@/components/crm/sticky-notes-card";
 import { UserLookup } from "@/components/crm/user-lookup";
 
@@ -130,7 +128,6 @@ import {
   ChevronDown,
   Trash2,
   CreditCard,
-  CalendarClock,
 } from "lucide-react";
 
 const RECOVERY_REASONS = [
@@ -181,6 +178,7 @@ interface LeadData {
   notes?: string;
   customFields?: Record<string, unknown>;
   owner?: { id: string; firstName: string; lastName: string; phone?: string | null };
+  bookedBy?: { id: string; firstName: string; lastName: string } | null;
   creator?: { id: string; firstName: string; lastName: string };
   project?: { id: string; name: string; allowedRadiusMeters?: number };
   rrQueue?: { id: string; name: string } | null;
@@ -341,8 +339,8 @@ function callStatusLabel(status?: string | null) {
 
 function callEndOneMinuteAfter(startValue: string) {
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(startValue)) return "";
-  const start = crmLocalDateTimeToDate(startValue.slice(0, 10), startValue.slice(11, 16));
-  return crmDateTimeInputValue(new Date(start.getTime() + 60_000));
+  const start = crmLocalDateTimeToDate(startValue.slice(0, 10), startValue.slice(11, 16), getTenantTimezone());
+  return dateTimeInputValue(new Date(start.getTime() + 60_000));
 }
 
 export default function LeadDetailPage() {
@@ -363,6 +361,9 @@ export default function LeadDetailPage() {
   const status = lead?.status || "";
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [isLoading, setIsLoading] = React.useState(true);
+  React.useEffect(() => {
+    if (typeof window !== "undefined") window.scrollTo(0, 0);
+  }, [leadId]);
   const [isActionLoading, setIsActionLoading] = React.useState(false);
   const [activeTab, setActiveTab] = React.useState("overview");
   React.useEffect(() => {
@@ -374,6 +375,12 @@ export default function LeadDetailPage() {
   const [recoveryNote, setRecoveryNote] = React.useState("");
   const [layout, setLayout] = React.useState<any>(null);
   const [fields, setFields] = React.useState<any[]>([]);
+  const enquirySourceOptions = React.useMemo(() => {
+    const sourceField = fields.find((field: any) => field.name === "source");
+    return (sourceField?.picklistValues || [])
+      .filter((option: any) => option.isActive !== false)
+      .map((option: any) => ({ value: String(option.value), label: String(option.label || option.value) }));
+  }, [fields]);
 
   const [followUpDialogOpen, setFollowUpDialogOpen] = React.useState(false);
   const [followUpNote, setFollowUpNote] = React.useState("");
@@ -500,12 +507,21 @@ export default function LeadDetailPage() {
       ]);
 
       if (leadResult.status === "fulfilled" && leadResult.value.data?.success && leadResult.value.data.data) {
+        const foundLead = leadResult.value.data.data;
         setLoadError(null);
-        setLead(leadResult.value.data.data);
+        setLead(foundLead);
+        if (foundLead.id !== leadId && typeof window !== "undefined") {
+          router.replace(`/leads/${encodeURIComponent(foundLead.id)}${window.location.search}`);
+        }
       } else {
-        const errorMessage = leadResult.status === "rejected"
-          ? "Failed to load lead"
-          : leadResult.value?.data?.error || "Lead not found";
+        const requestError = leadResult.status === "rejected"
+          ? leadResult.reason as { response?: { status?: number; data?: { error?: string } } }
+          : null;
+        const errorMessage = requestError?.response?.status === 404
+          ? "Lead not found. It may have been deleted."
+          : requestError?.response?.data?.error
+            || (leadResult.status === "fulfilled" ? leadResult.value?.data?.error : null)
+            || "Failed to load lead";
         setLead(null);
         setLoadError(errorMessage);
         toast({ title: "Error", description: errorMessage, variant: "destructive" as any });
@@ -534,7 +550,7 @@ export default function LeadDetailPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [leadId, profile?.name, toast]);
+  }, [leadId, profile?.name, router, toast]);
 
   const saveLeadLayout = async (sections: { name: string; fields: string[] }[]) => {
     if (!layout?.id) {
@@ -677,7 +693,7 @@ export default function LeadDetailPage() {
   };
 
   const openCallDialog = () => {
-    const startValue = crmDateTimeInputValue();
+    const startValue = dateTimeInputValue();
     setCallType("OUTBOUND");
     setCallStartAt(startValue);
     setCallEndAt(callEndOneMinuteAfter(startValue));
@@ -693,8 +709,8 @@ export default function LeadDetailPage() {
       toast({ title: "Call details required", description: "Enter both the call start time and end time.", variant: "destructive" });
       return;
     }
-    const startAt = crmLocalDateTimeToDate(callStartAt.slice(0, 10), callStartAt.slice(11, 16));
-    const endAt = crmLocalDateTimeToDate(callEndAt.slice(0, 10), callEndAt.slice(11, 16));
+    const startAt = crmLocalDateTimeToDate(callStartAt.slice(0, 10), callStartAt.slice(11, 16), getTenantTimezone());
+    const endAt = crmLocalDateTimeToDate(callEndAt.slice(0, 10), callEndAt.slice(11, 16), getTenantTimezone());
     if (!Number.isFinite(startAt.getTime()) || !Number.isFinite(endAt.getTime()) || endAt < startAt) {
       toast({ title: "Invalid call time", description: "The end time cannot be before the start time. The same time is allowed.", variant: "destructive" });
       return;
@@ -1300,7 +1316,7 @@ export default function LeadDetailPage() {
     }
     setIsActionLoading(true);
     try {
-      const scheduledAt = crmLocalDateTimeToDate(siteVisitForm.date, siteVisitForm.time).toISOString();
+      const scheduledAt = crmLocalDateTimeToDate(siteVisitForm.date, siteVisitForm.time, getTenantTimezone()).toISOString();
       const response = await leadApi.scheduleSiteVisit(leadId, {
         scheduledAt,
         projectId: siteVisitForm.projectId,
@@ -1491,7 +1507,7 @@ export default function LeadDetailPage() {
     }
     setIsActionLoading(true);
     try {
-      const scheduledAt = crmLocalDateTimeToDate(revisitForm.date, revisitForm.time).toISOString();
+      const scheduledAt = crmLocalDateTimeToDate(revisitForm.date, revisitForm.time, getTenantTimezone()).toISOString();
       const updateCustomFields = {
         schedule_call_summary_remarks: revisitForm.callSummaryRemarks.trim() || null,
         schedule_minimum_budget: revisitForm.minimumBudget,
@@ -1586,7 +1602,7 @@ export default function LeadDetailPage() {
     setIsActionLoading(true);
     try {
       const response = await siteVisitApi.complete(activeSv.id, {
-        completedAt: crmLocalDateTimeToDate(completeSvTime.split("T")[0], completeSvTime.split("T")[1]).toISOString(),
+        completedAt: crmLocalDateTimeToDate(completeSvTime.split("T")[0], completeSvTime.split("T")[1], getTenantTimezone()).toISOString(),
         customerFeedback: completeSvFeedback.trim(),
         completionNotes: completeSvNotes.trim(),
       });
@@ -1817,8 +1833,12 @@ export default function LeadDetailPage() {
 
   if (!lead) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <p className="text-muted-foreground">{loadError || "Lead not found"}</p>
+      <div className="flex min-h-64 flex-col items-center justify-center gap-4 text-center">
+        <p role="alert" className="text-muted-foreground">{loadError || "Lead not found"}</p>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => router.push("/leads")}>Back to Leads</Button>
+          <Button variant="outline" onClick={() => void fetchLead()}>Retry</Button>
+        </div>
       </div>
     );
   }
@@ -1957,8 +1977,16 @@ export default function LeadDetailPage() {
                 <div className="min-w-0">
                   <p className="text-[10px] leading-4 text-slate-500">Owner</p>
                   <p className="truncate text-[12px] font-medium leading-4 text-slate-800">
-                    {lead.status === "BOOKED" ? getLeadStatusLabel(lead.status) : lead.owner ? `${lead.owner.firstName} ${lead.owner.lastName}` : "—"}
+                    {lead.owner ? `${lead.owner.firstName} ${lead.owner.lastName}` : "—"}
                   </p>
+                  {lead.status === "BOOKED" && lead.bookedBy && (
+                    <p className="truncate text-[10px] leading-4 text-slate-500">
+                      Booked by {lead.bookedBy.firstName} {lead.bookedBy.lastName}
+                    </p>
+                  )}
+                  {lead.customFields?.bookedBucketAssignment === "ADMIN_FALLBACK" && (
+                    <p className="truncate text-[10px] font-medium leading-4 text-amber-700">Assigned by Admin fallback</p>
+                  )}
                 </div>
                 <div className="min-w-0">
                   <p className="text-[10px] leading-4 text-slate-500">Project</p>
@@ -2089,11 +2117,6 @@ export default function LeadDetailPage() {
           <TabsTrigger value="receipts" className="h-7 shrink-0 gap-1.5 rounded-sm px-2.5 text-[11px] font-medium text-slate-600 data-[state=active]:bg-white data-[state=active]:text-slate-900 data-[state=active]:shadow-sm">
             <CreditCard className="h-4 w-4" />Payment
           </TabsTrigger>
-          {(isCrm || isAdminLike) && (
-            <TabsTrigger value="installments" className="h-7 shrink-0 gap-1.5 rounded-sm px-2.5 text-[11px] font-medium text-slate-600 data-[state=active]:bg-white data-[state=active]:text-slate-900 data-[state=active]:shadow-sm">
-              <CalendarClock className="h-4 w-4" />Installments
-            </TabsTrigger>
-          )}
           <TabsTrigger value="feedbacks" className="h-7 shrink-0 gap-1.5 rounded-sm px-2.5 text-[11px] font-medium text-slate-600 data-[state=active]:bg-white data-[state=active]:text-slate-900 data-[state=active]:shadow-sm">
             <StickyNote className="h-4 w-4" />Feedbacks
           </TabsTrigger>
@@ -2589,12 +2612,6 @@ export default function LeadDetailPage() {
         <TabsContent value="receipts">
           <LeadReceipts leadId={lead.id} />
         </TabsContent>
-        {(isCrm || isAdminLike) && (
-          <TabsContent value="installments">
-            <LeadInstallments leadId={lead.id} />
-          </TabsContent>
-        )}
-
         {/* Call Details Tab */}
         <TabsContent value="call-details">
           <Card className="overflow-hidden">
@@ -3732,7 +3749,21 @@ export default function LeadDetailPage() {
                 </div>
                 <div className="grid grid-cols-[minmax(110px,0.7fr)_minmax(0,1.3fr)] items-center gap-3">
                   <Label>Source <span className="text-destructive">*</span></Label>
-                  <Input value={enquiryEditDraft.source} onChange={(event) => updateEnquiryDraft("source", event.target.value)} maxLength={120} />
+                  {enquirySourceOptions.length > 0 ? (
+                    <Select value={enquiryEditDraft.source} onValueChange={(value) => updateEnquiryDraft("source", value)}>
+                      <SelectTrigger aria-label="Enquiry Source"><SelectValue placeholder="Select source" /></SelectTrigger>
+                      <SelectContent>
+                        {!enquirySourceOptions.some((option: any) => option.value === enquiryEditDraft.source) && enquiryEditDraft.source && (
+                          <SelectItem value={enquiryEditDraft.source}>{enquiryEditDraft.source} (legacy)</SelectItem>
+                        )}
+                        {enquirySourceOptions.map((option: any) => (
+                          <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    <Input value={enquiryEditDraft.source} onChange={(event) => updateEnquiryDraft("source", event.target.value)} maxLength={120} />
+                  )}
                 </div>
                 <div className="grid grid-cols-[minmax(110px,0.7fr)_minmax(0,1.3fr)] items-center gap-3">
                   <Label>Campaign</Label>

@@ -1,8 +1,9 @@
 import type { Prisma } from '@prisma/client';
+import { resolveCRMTimezone } from '@dct-crm/shared';
 
-function formatIndiaTimestamp(date: Date): string {
+function formatTenantTimestamp(date: Date, timeZone: string): string {
   const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'Asia/Kolkata',
+    timeZone,
     month: 'long',
     day: '2-digit',
     year: 'numeric',
@@ -24,7 +25,7 @@ export async function appendLeadProcessNote(
     content: string;
   },
 ): Promise<void> {
-  const [lead, author] = await Promise.all([
+  const [lead, author, tenant] = await Promise.all([
     tx.lead.findFirst({
       where: { id: input.leadId, tenantId: input.tenantId },
       select: { notes: true },
@@ -32,6 +33,10 @@ export async function appendLeadProcessNote(
     tx.user.findFirst({
       where: { id: input.userId, tenantId: input.tenantId },
       select: { firstName: true, lastName: true },
+    }),
+    tx.tenant.findUnique({
+      where: { id: input.tenantId },
+      select: { timezone: true },
     }),
   ]);
   if (!lead) throw new Error('Lead not found while saving process note');
@@ -48,7 +53,8 @@ export async function appendLeadProcessNote(
   const existingNumbers = Array.from(existingNotes.matchAll(/\bNote\s+(\d+):/gi), (match) => Number(match[1]));
   const noteNumber = Math.max(0, ...existingNumbers) + 1;
   const authorName = [author.firstName, author.lastName].filter(Boolean).join(' ') || 'CRM User';
-  const entry = `Note ${noteNumber}: (${authorName}) - (${formatIndiaTimestamp(new Date())}):\n${input.content.trim()}`;
+  const timezone = resolveCRMTimezone(tenant?.timezone);
+  const entry = `Note ${noteNumber}: (${authorName}) - (${formatTenantTimestamp(new Date(), timezone)}):\n${input.content.trim()}`;
 
   await tx.lead.update({
     where: { id: input.leadId },

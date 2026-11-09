@@ -33,7 +33,7 @@ const nextConfig = {
       headers: [
         {
           key: 'Content-Security-Policy',
-          value: `frame-src 'self' ${dialpadOrigin}`,
+          value: `frame-src 'self' blob: ${dialpadOrigin}`,
         },
         {
           key: 'Permissions-Policy',

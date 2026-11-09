@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { exportReportCsv } from "@/lib/report-export";
 import { useAuth } from "@/contexts/auth-context";
 import { companyApi } from "@/lib/api";
+import { formatDateShort, formatDateTime } from "@/lib/date-format";
 
 type ReportView = "recent" | "createdByMe" | "private" | "public" | "all" | "favorites";
 type FolderView = "all" | "createdByMe" | "sharedWithMe" | "favorites";
@@ -21,14 +22,7 @@ interface ReportType { name: string; object?: string; label: string; category: s
 
 function formatReportDate(value: string | null | undefined, withTime = false) {
   if (!value) return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "—";
-  return new Intl.DateTimeFormat("en-IN", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    ...(withTime ? { hour: "2-digit" as const, minute: "2-digit" as const } : {}),
-  }).format(date);
+  return withTime ? formatDateTime(value) : formatDateShort(value);
 }
 
 const viewLabels: Record<ReportView, string> = { recent: "Recent", createdByMe: "Created by Me", private: "Private Reports", public: "Public Reports", all: "All Reports", favorites: "All Favorites" };

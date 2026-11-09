@@ -53,9 +53,9 @@ const tx = {
 const paymentPlan = {
   name: 'Construction-linked custom plan',
   installments: [
-    { milestone: 'On confirmation', percentage: 10, dueMonths: 0 },
-    { milestone: 'On foundation', percentage: 25, dueMonths: 2 },
-    { milestone: 'On possession', percentage: 65, dueMonths: 12 },
+    { milestone: 'On confirmation', percentage: 10, dueDays: 0 },
+    { milestone: 'On foundation', percentage: 25, dueDays: 60 },
+    { milestone: 'On possession', percentage: 65, dueDays: 365 },
   ],
 };
 
@@ -65,7 +65,7 @@ const quotationInput = {
   unitId: 'unit-a',
   pricePerSqFt: 1000,
   plcAmount: 25000,
-  discountAmount: 10000,
+  discountPercent: 1,
   paymentPlan,
 };
 
@@ -95,6 +95,7 @@ beforeEach(() => {
     lastName: 'Sharma',
     company: 'Asha Sharma',
     mobile: '9999999999',
+    email: 'asha@example.com',
   });
   database.siteVisitFindFirst.mockResolvedValue({ id: 'visit-a' });
   database.projectFindFirst.mockResolvedValue({ id: 'project-a', name: 'North Tower' });
@@ -136,6 +137,7 @@ describe('POST /api/quotations/lead/:leadId', () => {
       success: true,
       data: {
         quotationNumber: expect.stringMatching(/^QT-\d{4}-000002$/),
+        discountAmount: 10000,
         totalPrice: 1015000,
         paymentPlanName: paymentPlan.name,
         paymentPlan: savedPlan,
@@ -143,6 +145,7 @@ describe('POST /api/quotations/lead/:leadId', () => {
     });
     expect(database.quotationCreate).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
+        discountAmount: 10000,
         totalPrice: 1015000,
         paymentPlan: savedPlan,
       }),
@@ -155,8 +158,8 @@ describe('POST /api/quotations/lead/:leadId', () => {
       name: 'Day linked plan',
       installments: [
         { milestone: 'Booking', percentage: 10, dueDays: 0 },
-        { milestone: 'Agreement', percentage: 40, dueDays: 20 },
-        { milestone: 'Possession', percentage: 50, dueDays: 100 },
+        { milestone: 'Agreement', percentage: 40, dueDays: 60 },
+        { milestone: 'Possession', percentage: 50, dueDays: 365 },
       ],
     };
     const response = await createQuotation({ ...quotationInput, paymentPlan: dayPlan });
@@ -168,11 +171,104 @@ describe('POST /api/quotations/lead/:leadId', () => {
           name: 'Day linked plan',
           installments: [
             { milestone: 'Booking', percentage: 10, dueDays: 0, amount: amounts[0] },
-            { milestone: 'Agreement', percentage: 40, dueDays: 20, amount: amounts[1] },
-            { milestone: 'Possession', percentage: 50, dueDays: 100, amount: amounts[2] },
+            { milestone: 'Agreement', percentage: 40, dueDays: 60, amount: amounts[1] },
+            { milestone: 'Possession', percentage: 50, dueDays: 365, amount: amounts[2] },
           ],
         },
       }),
+    }));
+  });
+
+  it('rejects month-based installment input for new quotations', async () => {
+    const response = await createQuotation({
+      ...quotationInput,
+      paymentPlan: {
+        name: 'Month based plan',
+        installments: [
+          { milestone: 'Booking', percentage: 10, dueMonths: 0 },
+          { milestone: 'Registration', percentage: 90, dueMonths: 1 },
+        ],
+      },
+    });
+
+    expect(response.status).toBe(400);
+    expect(database.quotationCreate).not.toHaveBeenCalled();
+  });
+
+  it('rejects day offsets outside the supported range', async () => {
+    const response = await createQuotation({
+      ...quotationInput,
+      paymentPlan: {
+        name: 'Out of range plan',
+        installments: [
+          { milestone: 'Booking', percentage: 10, dueDays: 0 },
+          { milestone: 'Registration', percentage: 90, dueDays: 3651 },
+        ],
+      },
+    });
+
+    expect(response.status).toBe(400);
+    expect(database.quotationCreate).not.toHaveBeenCalled();
+  });
+
+  it.each([null, 'not-an-email'])('requires a valid lead email before creating a quotation (%s)', async (email) => {
+    database.leadFindFirst.mockResolvedValue({
+      id: 'lead-a',
+      tenantId: 'tenant-a',
+      ownerId: 'sales-a',
+      creatorId: 'sales-a',
+      firstName: 'Asha',
+      lastName: 'Sharma',
+      mobile: '9999999999',
+      email,
+    });
+
+    const response = await createQuotation();
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: 'A valid email address is required on the lead before creating a quotation',
+    });
+    expect(database.quotationCreate).not.toHaveBeenCalled();
+  });
+
+  it('rejects a percentage discount that would make the quotation total negative', async () => {
+    const response = await createQuotation({ ...quotationInput, discountPercent: 103 });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: 'Quotation total cannot be negative' });
+    expect(database.quotationCreate).not.toHaveBeenCalled();
+  });
+
+  it('calculates the percentage discount from the unit base price, not PLC charges', async () => {
+    const response = await createQuotation({ ...quotationInput, discountPercent: 10 });
+
+    expect(response.status).toBe(201);
+    expect(database.quotationCreate).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ discountAmount: 100000, totalPrice: 925000 }),
+    }));
+  });
+
+  it('allows a 100 percent discount when the resulting quotation total is zero', async () => {
+    database.unitFindFirst.mockResolvedValue({
+      id: 'unit-a',
+      number: 'A-101',
+      type: '2BHK',
+      area: 1000,
+      price: 1000000,
+      status: 'AVAILABLE',
+    });
+
+    const response = await createQuotation({
+      ...quotationInput,
+      pricePerSqFt: 0.01,
+      plcAmount: 0,
+      discountPercent: 100,
+    });
+
+    expect(response.status).toBe(201);
+    expect(database.quotationCreate).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ discountAmount: 10, totalPrice: 0 }),
     }));
   });
 
@@ -183,7 +279,7 @@ describe('POST /api/quotations/lead/:leadId', () => {
         name: 'Duplicate plan',
         installments: [
           { milestone: 'Booking', percentage: 40, dueDays: 0 },
-          { milestone: 'booking', percentage: 60, dueDays: 20 },
+          { milestone: 'booking', percentage: 60, dueDays: 60 },
         ],
       },
     });
@@ -196,7 +292,7 @@ describe('POST /api/quotations/lead/:leadId', () => {
         name: 'Over total',
         installments: [
           { milestone: 'Booking', percentage: 20, dueDays: 0 },
-          { milestone: 'Registration', percentage: 90, dueDays: 50 },
+          { milestone: 'Registration', percentage: 90, dueDays: 150 },
         ],
       },
     });

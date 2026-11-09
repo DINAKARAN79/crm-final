@@ -19,18 +19,14 @@ const quotationSchema = z.object({
   unitId: z.string().min(1),
   pricePerSqFt: z.number().positive().finite(),
   plcAmount: z.number().min(0).finite(),
-  discountAmount: z.number().min(0).finite(),
+  discountPercent: z.number().min(0).finite(),
   paymentPlan: z.object({
     name: z.string().trim().min(1).max(120),
     installments: z.array(z.object({
       milestone: z.string().trim().min(1, 'Milestone name is required').max(120),
       percentage: z.number().positive('Percentage must be greater than 0').max(100, 'Percentage cannot exceed 100'),
-      dueMonths: z.number().int().min(0).max(120).optional(),
-      dueDays: z.number().int('Enter a whole number of days').min(0, 'Due days cannot be negative').max(3650, 'Due days cannot exceed 3650').optional(),
-    }).refine(
-      (installment) => installment.dueDays !== undefined || installment.dueMonths !== undefined,
-      { message: 'Enter the number of days until this installment is due' },
-    )).min(1).max(12).superRefine((installments, context) => {
+      dueDays: z.number().int('Enter a whole number of days').min(0, 'Due days cannot be negative').max(3650, 'Due days cannot exceed 3650'),
+    }).strict()).min(1).max(12).superRefine((installments, context) => {
       const total = Math.round(installments.reduce((sum, item) => sum + item.percentage, 0) * 100) / 100;
       if (total !== 100) {
         context.addIssue({
@@ -65,7 +61,6 @@ router.get(
       if (!(await canAccessLead(req.user!, lead))) {
         return res.status(403).json({ success: false, error: 'You do not have access to this lead' });
       }
-
       const quotations = await prisma.quotation.findMany({
         where: { tenantId, leadId: lead.id },
         include: {
@@ -98,6 +93,9 @@ router.post(
       if (!lead) return res.status(404).json({ success: false, error: 'Lead not found' });
       if (!(await canAccessLead(req.user!, lead))) {
         return res.status(403).json({ success: false, error: 'You do not have access to this lead' });
+      }
+      if (!z.string().trim().email().safeParse(lead.email).success) {
+        return res.status(400).json({ success: false, error: 'A valid email address is required on the lead before creating a quotation' });
       }
 
       const [siteVisit, project, unit] = await Promise.all([
@@ -135,8 +133,13 @@ router.post(
       }
 
       const basePrice = unitArea * input.pricePerSqFt;
-      const totalPrice = basePrice + input.plcAmount - input.discountAmount;
-      if (!Number.isFinite(totalPrice) || totalPrice < 0) {
+      const subtotal = basePrice + input.plcAmount;
+      const discountAmount = Math.round((basePrice * input.discountPercent / 100) * 100) / 100;
+      const totalPrice = subtotal - discountAmount;
+      if (![basePrice, subtotal, discountAmount, totalPrice].every(Number.isFinite)) {
+        return res.status(400).json({ success: false, error: 'Quotation price calculations must be finite' });
+      }
+      if (totalPrice < 0) {
         return res.status(400).json({ success: false, error: 'Quotation total cannot be negative' });
       }
       const installmentAmounts = quotationScheduleAmounts(
@@ -148,7 +151,7 @@ router.post(
         installments: input.paymentPlan.installments.map((installment, index) => ({
           milestone: installment.milestone,
           percentage: installment.percentage,
-          ...(installment.dueDays !== undefined ? { dueDays: installment.dueDays } : { dueMonths: installment.dueMonths ?? 0 }),
+          dueDays: installment.dueDays,
           amount: installmentAmounts[index],
         })),
       };
@@ -179,7 +182,7 @@ router.post(
             quotationNumber,
             customerName: [lead.firstName, lead.lastName].filter(Boolean).join(' ') || lead.company,
             customerPhone: lead.mobile || lead.phone,
-            customerEmail: lead.email,
+            customerEmail: lead.email?.trim() ?? null,
             customerAddress: [lead.street, lead.city, lead.stateProvince, lead.postalCode, lead.country]
               .filter(Boolean)
               .join(', '),
@@ -190,7 +193,7 @@ router.post(
             pricePerSqFt: input.pricePerSqFt,
             basePrice,
             plcAmount: input.plcAmount,
-            discountAmount: input.discountAmount,
+            discountAmount,
             totalPrice,
             paymentPlanName: paymentPlan.name,
             paymentPlan: paymentPlan as Prisma.InputJsonValue,
@@ -309,7 +312,7 @@ router.get(
 
       const tenant = await prisma.tenant.findFirst({
         where: { id: tenantId },
-        select: { name: true, logo: true, email: true, phone: true, website: true, address: true, city: true, state: true, country: true, postalCode: true },
+        select: { name: true, logo: true, email: true, phone: true, website: true, address: true, city: true, state: true, country: true, postalCode: true, timezone: true },
       });
 
       const fileName = `${quotation.quotationNumber.replace(/[^A-Za-z0-9_-]/g, '-')}.pdf`;
@@ -322,6 +325,7 @@ router.get(
         logo: companyLogo(tenant?.logo),
         quotationNumber: quotation.quotationNumber,
         quotationDate: quotation.confirmedAt,
+        timeZone: tenant?.timezone,
         status: quotation.booking ? 'Booked' : quotation.status,
         customerName: quotation.customerName,
         customerPhone: quotation.customerPhone,

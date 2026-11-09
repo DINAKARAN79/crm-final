@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { crmDateRangeBounds, crmLocalDateTimeToDate } from '@dct-crm/shared';
 import { getGreLeadStatus, greDraftSchema, greLocationSchema, greSubmissionSchema, normalizePhone, normalizeStoredPhone, phoneCheckSchema, phoneSearchVariants, selectScheduledVisitToComplete, submissionsQuerySchema } from './gre';
 
 describe('GRE phone validation and matching', () => {
@@ -13,12 +14,22 @@ describe('GRE phone validation and matching', () => {
     expect(selectScheduledVisitToComplete([], target)).toBeNull();
   });
 
-  it('marks GRE Leads as Site Visit Happened only when a completed visit is submitted', () => {
-    expect(getGreLeadStatus(true)).toBe('SITE_VISIT_HAPPENED');
+  it('preserves existing configured Lead Status without inventing a GRE transition', () => {
+    expect(getGreLeadStatus(true)).toBe('NEW');
     expect(getGreLeadStatus(false)).toBe('NEW');
     expect(getGreLeadStatus(false, 'PROSPECT')).toBe('PROSPECT');
-    expect(getGreLeadStatus(true, 'INCOMING')).toBe('SITE_VISIT_HAPPENED');
-    expect(getGreLeadStatus(true, 'LOST')).toBe('SITE_VISIT_HAPPENED');
+    expect(getGreLeadStatus(true, 'INCOMING')).toBe('INCOMING');
+    expect(getGreLeadStatus(true, 'LOST')).toBe('LOST');
+  });
+
+  it('converts and filters tenant-local calendar dates while keeping UTC timestamps', () => {
+    expect(crmLocalDateTimeToDate('2026-07-01', '09:00', 'America/New_York').toISOString())
+      .toBe('2026-07-01T13:00:00.000Z');
+    const range = crmDateRangeBounds('2026-07-01', '2026-07-01', 'America/New_York');
+    expect(range).toEqual({
+      gte: new Date('2026-07-01T04:00:00.000Z'),
+      lt: new Date('2026-07-02T04:00:00.000Z'),
+    });
   });
 
   it('accepts national phone input with a separate country code', () => {

@@ -25,6 +25,7 @@ const database = vi.hoisted(() => ({
   bookingCreate: vi.fn(),
   tenantFindFirst: vi.fn(),
   transaction: vi.fn(),
+  moveLeadToBookedBucket: vi.fn(),
 }));
 
 vi.mock('@dct-crm/db', () => ({
@@ -71,6 +72,9 @@ vi.mock('../middleware/authorization', () => ({
 
 vi.mock('../middleware/audit', () => ({ auditLog: database.auditLogWrite }));
 vi.mock('../services/recordAccess', () => ({ canAccessLead: vi.fn(async () => true) }));
+vi.mock('../services/bookedBucket', () => ({
+  moveLeadToBookedBucket: database.moveLeadToBookedBucket,
+}));
 
 import bookingsRouter from './bookings';
 import { auditLog } from '../middleware/audit';
@@ -141,6 +145,16 @@ async function getLeadBookings(leadId = 'lead-a') {
   return fetch(`http://127.0.0.1:${address.port}/api/bookings/lead/${leadId}`);
 }
 
+async function getBooking(bookingId = 'booking-a') {
+  const app = express();
+  app.use('/api/bookings', bookingsRouter);
+  const server = app.listen(0);
+  servers.push(server);
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Expected a TCP server address');
+  return fetch(`http://127.0.0.1:${address.port}/api/bookings/${bookingId}`);
+}
+
 async function getBookingPdf(leadId = 'lead-a', bookingId = 'booking-a') {
   const app = express();
   app.use('/api/bookings', bookingsRouter);
@@ -159,6 +173,21 @@ async function getBookingActivity(bookingId = 'booking-a', endpoint: 'activity-h
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('Expected a TCP server address');
   return fetch(`http://127.0.0.1:${address.port}/api/bookings/${bookingId}/${endpoint}`);
+}
+
+async function addBookingNote(bookingId = 'booking-a', note: unknown = 'Customer requested an update') {
+  const app = express();
+  app.use(express.json());
+  app.use('/api/bookings', bookingsRouter);
+  const server = app.listen(0);
+  servers.push(server);
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Expected a TCP server address');
+  return fetch(`http://127.0.0.1:${address.port}/api/bookings/${bookingId}/notes`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ note }),
+  });
 }
 
 async function updateBookingDetails(bookingId: string, details: unknown) {
@@ -365,6 +394,12 @@ describe('POST /api/bookings/lead/:leadId/quotation/:quotationId', () => {
           where: { id: 'lead-a' },
           data: { status: 'BOOKED' },
         });
+        expect(database.moveLeadToBookedBucket).toHaveBeenCalledWith(
+          'lead-a',
+          'booking',
+          tx,
+          'sales-a',
+        );
         expect(database.activityCreate).toHaveBeenCalledWith(expect.objectContaining({
           data: expect.objectContaining({
             bookingId: 'booking-a',
@@ -473,6 +508,24 @@ describe('GET /api/bookings/lead/:leadId', () => {
   });
 });
 
+describe('GET /api/bookings/:bookingId', () => {
+  it('includes the lead round-robin owner for CRM booking attribution', async () => {
+    const response = await getBooking();
+
+    expect(response.status).toBe(200);
+    expect(database.bookingFindFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'booking-a', tenantId: 'tenant-a' },
+      include: expect.objectContaining({
+        lead: expect.objectContaining({
+          select: expect.objectContaining({
+            bookedBy: { select: { id: true, firstName: true, lastName: true } },
+          }),
+        }),
+      }),
+    }));
+  });
+});
+
 describe('GET /api/bookings/:bookingId/activity-history', () => {
   it('returns only activities and follow-ups attached to the requested booking', async () => {
     database.activityFindMany.mockResolvedValue([{
@@ -542,6 +595,56 @@ describe('GET /api/bookings/:bookingId/audit-history', () => {
     expect(database.auditLogFindMany).toHaveBeenCalledWith(expect.objectContaining({
       where: { tenantId: 'tenant-a', objectType: 'Booking', objectId: 'booking-a' },
     }));
+  });
+});
+
+describe('POST /api/bookings/:bookingId/notes', () => {
+  it('creates a note as a booking-scoped activity', async () => {
+    database.bookingFindFirst.mockResolvedValue({ id: 'booking-a', leadId: 'lead-a' });
+    database.activityCreate.mockResolvedValue({
+      id: 'booking-note',
+      type: 'NOTE',
+      subject: 'Booking Note',
+      description: 'Customer requested an update',
+    });
+
+    const response = await addBookingNote('booking-a', '  Customer requested an update  ');
+
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({
+      success: true,
+      data: { id: 'booking-note', type: 'NOTE', description: 'Customer requested an update' },
+    });
+    expect(database.bookingFindFirst).toHaveBeenCalledWith({
+      where: { id: 'booking-a', tenantId: 'tenant-a' },
+      select: { id: true, leadId: true },
+    });
+    expect(database.activityCreate).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        tenantId: 'tenant-a',
+        bookingId: 'booking-a',
+        leadId: 'lead-a',
+        userId: 'sales-a',
+        type: 'NOTE',
+        description: 'Customer requested an update',
+      }),
+    }));
+  });
+
+  it('rejects empty notes and does not create an activity', async () => {
+    const response = await addBookingNote('booking-a', '   ');
+
+    expect(response.status).toBe(400);
+    expect(database.activityCreate).not.toHaveBeenCalled();
+  });
+
+  it('does not create notes for bookings outside the authenticated tenant', async () => {
+    database.bookingFindFirst.mockResolvedValue(null);
+
+    const response = await addBookingNote('other-tenant-booking');
+
+    expect(response.status).toBe(404);
+    expect(database.activityCreate).not.toHaveBeenCalled();
   });
 });
 

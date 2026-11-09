@@ -72,6 +72,21 @@ describe('list view catalog', () => {
     });
   });
 
+  it('uses the tenant timezone for date filters', () => {
+    const filters = validateFilterSet('SITE_VISIT', {
+      logic: 'AND',
+      rules: [{ field: 'scheduledAt', operator: 'equals', value: '2026-10-28' }],
+    });
+    expect(filters.ok).toBe(true);
+    if (!filters.ok) return;
+    expect(compileListFilters('SITE_VISIT', filters.filters, {
+      userId: 'user-123',
+      timeZone: 'America/New_York',
+    })).toEqual({
+      scheduledAt: { gte: new Date('2026-10-28T04:00:00.000Z'), lt: new Date('2026-10-29T04:00:00.000Z') },
+    });
+  });
+
   it('compiles custom lead logic and an owner filter without raw input', () => {
     const filters = validateFilterSet('LEAD', {
       version: 2,

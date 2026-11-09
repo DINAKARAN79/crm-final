@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 
 import { DataTable } from "@/components/crm/data-table";
 
-import { format } from "date-fns";
+import { formatDate } from "@/lib/date-format";
 
 import { MoreHorizontal, Eye, Edit, Phone, Trash2 } from "lucide-react";
 import { TelephonyStatusHint } from "@/components/crm/telephony-status-hint";
@@ -43,6 +43,9 @@ export interface Lead {
   statusLabel?: string;
   rating?: string;
   assignedTo: string;
+  bookedBy?: string;
+  projectName?: string;
+  bookedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -61,6 +64,7 @@ interface LeadListProps {
   telephonyReasonCode?: string;
   isAdmin?: boolean;
   tenantId?: string;
+  bookedBucketView?: boolean;
   sorting?: { id: string; desc: boolean }[];
   onSortingChange?: (sorting: { id: string; desc: boolean }[]) => void;
 }
@@ -84,6 +88,7 @@ export function getLeadColumns({
   telephonyReasonCode = "NOT_CONFIGURED",
   isAdmin = false,
   tenantId,
+  bookedBucketView = false,
 }: {
   canDelete?: boolean;
   onDelete?: (lead: Lead) => void | Promise<void>;
@@ -93,7 +98,39 @@ export function getLeadColumns({
   telephonyReasonCode?: string;
   isAdmin?: boolean;
   tenantId?: string;
+  bookedBucketView?: boolean;
 } = {}): ColumnDef<Lead>[] {
+  if (bookedBucketView) {
+    return [
+      {
+        accessorKey: "leadNumber",
+        header: "Lead Number",
+        cell: ({ row }) => (
+          <Link href={`/leads/${row.original.id}`} className="whitespace-nowrap font-mono text-sm font-medium text-[#1479a8] hover:underline">
+            {row.original.leadNumber || "—"}
+          </Link>
+        ),
+      },
+      {
+        id: "name",
+        header: "Name",
+        cell: ({ row }) => (
+          <Link href={`/leads/${row.original.id}`} className="font-semibold text-[#075d91] hover:underline">
+            {[row.original.firstName, row.original.lastName].filter(Boolean).join(" ") || "Unnamed lead"}
+          </Link>
+        ),
+      },
+      { accessorKey: "projectName", header: "Project", cell: ({ row }) => row.original.projectName || "—" },
+      {
+        accessorKey: "bookedAt",
+        header: "Booked Date",
+        cell: ({ row }) => row.original.bookedAt ? formatDate(row.original.bookedAt) : "—",
+      },
+      { accessorKey: "bookedBy", header: "Booked by", cell: ({ row }) => row.original.bookedBy || "—" },
+      { accessorKey: "assignedTo", header: "Current Owner", cell: ({ row }) => row.original.assignedTo || "—" },
+    ];
+  }
+
   return [
     {
       accessorKey: "leadNumber",
@@ -201,8 +238,7 @@ export function getLeadColumns({
       accessorKey: "createdAt",
       header: "Created",
       cell: ({ row }) => {
-        const created = new Date(row.getValue("createdAt") as string);
-        return Number.isNaN(created.getTime()) ? "—" : format(created, "MMM d, yyyy");
+        return formatDate(row.getValue("createdAt") as string);
       },
     },
     {
@@ -275,12 +311,13 @@ export function LeadList({
   telephonyReasonCode = "NOT_CONFIGURED",
   isAdmin = false,
   tenantId,
+  bookedBucketView = false,
   sorting,
   onSortingChange,
 }: LeadListProps) {
   const columns = React.useMemo(
-    () => getLeadColumns({ canDelete, onDelete, canCall, onCall, callingLeadId, telephonyReasonCode, isAdmin, tenantId }),
-    [canDelete, onDelete, canCall, onCall, callingLeadId, telephonyReasonCode, isAdmin, tenantId],
+    () => getLeadColumns({ canDelete, onDelete, canCall, onCall, callingLeadId, telephonyReasonCode, isAdmin, tenantId, bookedBucketView }),
+    [canDelete, onDelete, canCall, onCall, callingLeadId, telephonyReasonCode, isAdmin, tenantId, bookedBucketView],
   );
 
   return (

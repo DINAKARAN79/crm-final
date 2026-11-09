@@ -1,4 +1,4 @@
-import { crmDateToUtcStart, evaluateFilterLogic, getCRMDayBounds, parseFilterLogic } from '@dct-crm/shared';
+import { DEFAULT_CRM_TIMEZONE, crmDateToUtcStart, evaluateFilterLogic, getCRMDayBounds, parseFilterLogic } from '@dct-crm/shared';
 
 export const LIST_MODULES = ['LEAD', 'FOLLOW_UP', 'SITE_VISIT', 'BOOKING', 'PROJECT', 'UNIT', 'MIS_APPROVAL'] as const;
 export type ListModule = (typeof LIST_MODULES)[number];
@@ -391,13 +391,23 @@ function nest(path: string, value: unknown): Record<string, unknown> {
   return root;
 }
 
-function monthBounds(now: Date) {
-  const [year, month] = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit' }).format(now).split('-');
-  const start = crmDateToUtcStart(`${year}-${month}-01`);
+function localDateKey(now: Date, timeZone: string) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now).map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+function monthBounds(now: Date, timeZone: string) {
+  const [year, month] = localDateKey(now, timeZone).split('-');
+  const start = crmDateToUtcStart(`${year}-${month}-01`, timeZone);
   const next = Number(month) === 12
     ? `${Number(year) + 1}-01-01`
     : `${year}-${String(Number(month) + 1).padStart(2, '0')}-01`;
-  return { gte: start, lt: crmDateToUtcStart(next) };
+  return { gte: start, lt: crmDateToUtcStart(next, timeZone) };
 }
 
 function nextDate(iso: string) {
@@ -407,40 +417,44 @@ function nextDate(iso: string) {
   return date.toISOString().slice(0, 10);
 }
 
-function weekBounds(now: Date) {
-  const today = getCRMDayBounds(now).start;
-  const ist = new Date(today.getTime() + 330 * 60 * 1000);
-  const weekday = ist.getUTCDay();
+function weekBounds(now: Date, timeZone: string) {
+  const today = localDateKey(now, timeZone);
+  const todayDate = new Date(`${today}T00:00:00.000Z`);
+  const weekday = todayDate.getUTCDay();
   const daysFromMonday = weekday === 0 ? 6 : weekday - 1;
-  const start = new Date(today.getTime() - daysFromMonday * 24 * 60 * 60 * 1000);
-  return { gte: start, lt: new Date(start.getTime() + 7 * 24 * 60 * 60 * 1000) };
+  todayDate.setUTCDate(todayDate.getUTCDate() - daysFromMonday);
+  const start = todayDate.toISOString().slice(0, 10);
+  todayDate.setUTCDate(todayDate.getUTCDate() + 7);
+  return { gte: crmDateToUtcStart(start, timeZone), lt: crmDateToUtcStart(todayDate.toISOString().slice(0, 10), timeZone) };
 }
 
-function last30Bounds(now: Date) {
-  const today = getCRMDayBounds(now);
-  return { gte: new Date(today.start.getTime() - 29 * 24 * 60 * 60 * 1000), lt: today.end };
+function last30Bounds(now: Date, timeZone: string) {
+  const today = localDateKey(now, timeZone);
+  const start = new Date(`${today}T00:00:00.000Z`);
+  start.setUTCDate(start.getUTCDate() - 29);
+  return { gte: crmDateToUtcStart(start.toISOString().slice(0, 10), timeZone), lt: getCRMDayBounds(now, timeZone).end };
 }
 
-function dateRange(value: string, operator: FilterOperator, now: Date): Record<string, Date> | null {
+function dateRange(value: string, operator: FilterOperator, now: Date, timeZone: string): Record<string, Date> | null {
   if (operator === 'today' || (value === '$today' && operator === 'equals')) {
-    const day = getCRMDayBounds(now);
+    const day = getCRMDayBounds(now, timeZone);
     return { gte: day.start, lt: day.end };
   }
-  if (operator === 'this_month' || (value === '$thisMonth' && operator === 'equals')) return monthBounds(now);
-  if (operator === 'this_week') return weekBounds(now);
-  if (operator === 'last_30_days') return last30Bounds(now);
+  if (operator === 'this_month' || (value === '$thisMonth' && operator === 'equals')) return monthBounds(now, timeZone);
+  if (operator === 'this_week') return weekBounds(now, timeZone);
+  if (operator === 'last_30_days') return last30Bounds(now, timeZone);
   if (operator === 'between') {
     const [start, end] = value.split(',');
     if (!DATE_RE.test(start) || !DATE_RE.test(end)) return null;
-    return { gte: crmDateToUtcStart(start), lt: crmDateToUtcStart(nextDate(end)) };
+    return { gte: crmDateToUtcStart(start, timeZone), lt: crmDateToUtcStart(nextDate(end), timeZone) };
   }
   if (!DATE_RE.test(value)) return null;
   if (operator === 'equals') {
-    const start = crmDateToUtcStart(value);
-    return { gte: start, lt: crmDateToUtcStart(nextDate(value)) };
+    const start = crmDateToUtcStart(value, timeZone);
+    return { gte: start, lt: crmDateToUtcStart(nextDate(value), timeZone) };
   }
-  if (operator === 'greater_than') return { gte: crmDateToUtcStart(nextDate(value)) };
-  if (operator === 'less_than') return { lt: crmDateToUtcStart(value) };
+  if (operator === 'greater_than') return { gte: crmDateToUtcStart(nextDate(value), timeZone) };
+  if (operator === 'less_than') return { lt: crmDateToUtcStart(value, timeZone) };
   return null;
 }
 
@@ -472,7 +486,7 @@ function followUpStatus(operator: FilterOperator, value: string) {
   return positive ? clause : { NOT: clause };
 }
 
-function presetWhere(preset: ListPreset, recentIds: string[], now: Date): Record<string, unknown> {
+function presetWhere(preset: ListPreset, recentIds: string[], now: Date, timeZone: string): Record<string, unknown> {
   if (preset === 'recent') return { id: { in: recentIds.length ? recentIds : ['__none__'] } };
   if (preset === 'leadOpen') return { status: { notIn: ['BOOKED', 'LOST'] } };
   if (preset === 'approvalsReviewed') return { approvalStatus: { in: ['APPROVED', 'REJECTED'] } };
@@ -484,7 +498,7 @@ function presetWhere(preset: ListPreset, recentIds: string[], now: Date): Record
       ],
     };
   }
-  const today = getCRMDayBounds(now).start;
+  const today = getCRMDayBounds(now, timeZone).start;
   return {
     OR: [
       { status: 'MISSED' },
@@ -497,7 +511,7 @@ function membershipValues(value: string, userId: string) {
   return value.split(',').map((item) => item.trim()).filter(Boolean).map((item) => (item === '$currentUser' ? userId : item));
 }
 
-function ruleClause(module: ListModule, item: FilterRule, userId: string, now: Date): Record<string, unknown> {
+function ruleClause(module: ListModule, item: FilterRule, userId: string, now: Date, timeZone: string): Record<string, unknown> {
   const field = FIELDS[module].find((entry) => entry.key === item.field)!;
   if (field.virtual === 'followUpStatus') return followUpStatus(item.operator, item.value || '');
   if (item.operator === 'in' || item.operator === 'not_in') {
@@ -507,7 +521,7 @@ function ruleClause(module: ListModule, item: FilterRule, userId: string, now: D
   if (field.kind === 'date') {
     if (item.operator === 'is_empty') return nest(field.paths![0], null);
     if (item.operator === 'is_not_empty') return { NOT: nest(field.paths![0], null) };
-    return nest(field.paths![0], dateRange(item.value || '', item.operator, now));
+    return nest(field.paths![0], dateRange(item.value || '', item.operator, now, timeZone));
   }
   if (field.kind === 'number') {
     if (item.operator === 'is_empty') return nest(field.paths![0], null);
@@ -533,8 +547,8 @@ function ruleClause(module: ListModule, item: FilterRule, userId: string, now: D
   return combine(field.paths || [], item.operator, (path) => textClause(path, item.operator, item.value || ''));
 }
 
-function criteriaWhere(module: ListModule, filters: FilterSet, userId: string, now: Date) {
-  const clauses = filters.rules.map((item) => ruleClause(module, item, userId, now));
+function criteriaWhere(module: ListModule, filters: FilterSet, userId: string, now: Date, timeZone: string) {
+  const clauses = filters.rules.map((item) => ruleClause(module, item, userId, now, timeZone));
   if (clauses.length === 0) return {};
   if (filters.version === 2) {
     if (!filters.filterLogic) return clauses.length === 1 ? clauses[0] : { AND: clauses };
@@ -558,12 +572,13 @@ function ownerWhere(module: ListModule, filters: FilterSet, userId: string) {
 export function compileListFilters(
   module: ListModule,
   filters: FilterSet,
-  context: { userId: string; now?: Date; recentIds?: string[]; presets?: ListPreset[] },
+  context: { userId: string; now?: Date; recentIds?: string[]; presets?: ListPreset[]; timeZone?: string },
 ): Record<string, unknown> {
   const now = context.now ?? new Date();
-  const filterWhere = criteriaWhere(module, filters, context.userId, now);
+  const timeZone = context.timeZone || DEFAULT_CRM_TIMEZONE;
+  const filterWhere = criteriaWhere(module, filters, context.userId, now, timeZone);
   const owner = ownerWhere(module, filters, context.userId);
-  const presets = (context.presets || []).map((preset) => presetWhere(preset, context.recentIds || [], now));
+  const presets = (context.presets || []).map((preset) => presetWhere(preset, context.recentIds || [], now, timeZone));
   const all = [...presets, ...(owner ? [owner] : []), ...(Object.keys(filterWhere).length ? [filterWhere] : [])];
   if (all.length === 0) return {};
   if (all.length === 1) return all[0];

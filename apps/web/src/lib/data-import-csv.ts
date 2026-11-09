@@ -35,6 +35,51 @@ export function parseCsvPreview(csv: string): { rows: string[][]; error: string 
   return { rows, error: "" };
 }
 
+export async function parseCsvPreviewAsync(
+  csv: string,
+  shouldContinue: () => boolean = () => true,
+): Promise<{ rows: string[][]; error: string } | null> {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let value = "";
+  let quoted = false;
+  const content = csv.replace(/^\uFEFF/, "");
+  const delimiter = detectDelimiter(content);
+
+  for (let index = 0; index < content.length; index += 1) {
+    if (index > 0 && index % 262_144 === 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      if (!shouldContinue()) return null;
+    }
+    const character = content[index];
+    if (character === '"') {
+      if (quoted && content[index + 1] === '"') {
+        value += '"';
+        index += 1;
+      } else {
+        quoted = !quoted;
+      }
+    } else if (!quoted && character === delimiter) {
+      row.push(value.trim());
+      value = "";
+    } else if (!quoted && (character === "\n" || character === "\r")) {
+      if (character === "\r" && content[index + 1] === "\n") index += 1;
+      row.push(value.trim());
+      if (row.some((cell) => cell !== "")) rows.push(row);
+      row = [];
+      value = "";
+    } else {
+      value += character;
+    }
+  }
+
+  if (!shouldContinue()) return null;
+  if (quoted) return { rows: [], error: "CSV contains an unterminated quoted field." };
+  row.push(value.trim());
+  if (row.some((cell) => cell !== "")) rows.push(row);
+  return { rows, error: "" };
+}
+
 export function serializeCsv(rows: string[][]): string {
   return rows.map((row) => row.map((cell) => {
     const value = cell.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
@@ -59,7 +104,11 @@ export function suggestCsvFieldMappings(
     const normalizedColumn = normalizeFieldName(column);
     const match = fields.find((field) =>
       !usedFields.has(field.name) &&
-      [field.name, field.label].some((candidate) => normalizeFieldName(candidate) === normalizedColumn),
+      [
+        field.name,
+        field.label,
+        ...(field.name === "ownerId" ? ["Owner", "Owner Email", "Owner ID"] : []),
+      ].some((candidate) => normalizeFieldName(candidate) === normalizedColumn),
     );
     if (match) {
       mappings[index] = match.name;

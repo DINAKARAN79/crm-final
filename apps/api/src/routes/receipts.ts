@@ -1,4 +1,6 @@
 import { Router, Response, NextFunction } from 'express';
+import fs from 'fs';
+import path from 'path';
 import { Prisma } from '@prisma/client';
 import PDFDocument from 'pdfkit';
 import { z } from 'zod';
@@ -9,6 +11,7 @@ import { authorize, authorizeEffectivePermission } from '../middleware/authoriza
 import { auditLog } from '../middleware/audit';
 import { canAccessLead } from '../services/recordAccess';
 import { assignLeadToProjectRoundRobinInTransaction } from '../services/rrQueue';
+import { moveLeadToBookedBucket } from '../services/bookedBucket';
 import { quotationScheduleAmounts } from '@dct-crm/shared';
 
 const router = Router();
@@ -19,13 +22,47 @@ const receiptInputSchema = z.object({
   receivedFrom: z.string().trim().min(1, 'Received from is required').max(200),
   amount: z.number().finite().positive('Amount must be greater than zero'),
   paymentMode: z.enum(['Cash', 'Cheque', 'Bank Transfer', 'UPI', 'Card', 'Other']),
-  transactionId: z.string().trim().max(120).optional().nullable(),
+  transactionId: z.string().trim().min(1, 'Transaction ID is required').max(120),
   receivedDate: z.string().date(),
 });
 
 const dateAtNoonUtc = (value: string) => new Date(`${value}T12:00:00.000Z`);
 const pdfDate = (value: Date) => value.toLocaleDateString('en-IN', { timeZone: 'UTC' });
-const money = (amount: number) => `INR ${amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+const money = (amount: number) => amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const companyLogo = (filename?: string | null): Buffer | null => {
+  if (!filename) return null;
+  const safeName = path.basename(filename);
+  if (safeName !== filename || !['.png', '.jpg', '.jpeg'].includes(path.extname(safeName).toLowerCase())) return null;
+  const logoPath = path.resolve(__dirname, '../../../uploads/logos', safeName);
+  return fs.existsSync(logoPath) ? fs.readFileSync(logoPath) : null;
+};
+const assertUniqueTransactionId = async (
+  tx: Prisma.TransactionClient,
+  tenantId: string,
+  transactionId: string,
+) => {
+  const existing = await tx.receipt.findFirst({
+    where: { tenantId, transactionId },
+    select: { id: true },
+  });
+  if (existing) throw new Error('DUPLICATE_TRANSACTION_ID');
+};
+
+const isTransactionIdUniqueConflict = (error: unknown) => {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') return false;
+  const target = error.meta?.target;
+  return Array.isArray(target)
+    ? target.includes('transactionId')
+    : typeof target === 'string' && target.includes('transactionId');
+};
+
+const getPaidAmount = async (tx: Prisma.TransactionClient, tenantId: string, bookingId: string) => {
+  const receipts = await tx.receipt.aggregate({
+    where: { tenantId, bookingId, approvalStatus: { in: ['APPROVED', 'ISSUED'] } },
+    _sum: { amount: true },
+  });
+  return receipts._sum.amount || 0;
+};
 type InstallmentReceipt = {
   amount: number;
   kind: 'MIS_SUBMISSION' | 'CRM_PAYMENT';
@@ -87,6 +124,37 @@ const reviewSchema = z.object({
   decision: z.enum(['APPROVE', 'REJECT']),
   note: z.string().trim().max(1000).optional(),
 });
+
+const refundRequestSchema = z.object({
+  bookingId: z.string().min(1),
+  requestKey: z.string().trim().min(1).max(120),
+  customerName: z.string().trim().min(1).max(200),
+  customerPhone: z.string().trim().max(40).optional().nullable(),
+  customerEmail: z.string().trim().email().max(254).optional().nullable(),
+  amount: z.number().finite().positive('Refund amount must be greater than zero'),
+  reason: z.string().trim().min(1).max(1000),
+  refundReference: z.string().trim().min(1).max(120),
+});
+
+const refundReviewSchema = z.object({
+  decision: z.enum(['APPROVE', 'REJECT']),
+  note: z.string().trim().max(1000).optional(),
+});
+
+const getRefundDetails = {
+  lead: { select: { id: true, leadNumber: true, firstName: true, lastName: true, mobile: true, email: true } },
+  booking: {
+    select: {
+      id: true,
+      bookingNumber: true,
+      status: true,
+      project: { select: { name: true } },
+      unit: { select: { number: true } },
+    },
+  },
+  createdBy: { select: { id: true, firstName: true, lastName: true } },
+  reviewedBy: { select: { id: true, firstName: true, lastName: true } },
+} satisfies Prisma.RefundRequestInclude;
 
 router.get(
   '/approvals',
@@ -182,12 +250,18 @@ router.post(
             reason: `MIS approved receipt ${receipt.receiptNumber}; assigned to CRM by round robin`,
             leadStatus: 'BOOKED',
           });
+          const bucketAssignment = await moveLeadToBookedBucket(
+            receipt.booking.leadId,
+            'booking',
+            tx,
+            reviewerId,
+          );
           const booked = await tx.booking.updateMany({
             where: { id: receipt.booking.id, tenantId, status: 'RESERVED' },
             data: { status: 'BOOKED', ownerId: assignment.assignedUserId },
           });
           if (booked.count !== 1) throw new Error('BOOKING_NOT_RESERVED');
-          return { status: 'APPROVED' as const, assignment };
+          return { status: 'APPROVED' as const, assignment, bucketAssignment };
         }
 
         if (receipt.booking.status === 'RESERVED') {
@@ -202,13 +276,15 @@ router.post(
             });
           }
         }
-        return { status: 'REJECTED' as const, assignment: null };
+        return { status: 'REJECTED' as const, assignment: null, bucketAssignment: null };
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 
       await auditLog(tenantId, reviewerId, 'UPDATE', 'Receipt', req.params.receiptId, undefined, {
         approvalStatus: result.status,
         note: input.note || null,
         assignedCRMUserId: result.assignment?.assignedUserId || null,
+        bookedBucketOwnerId: result.bucketAssignment?.owner?.id || null,
+        bookedBucketMoved: result.bucketAssignment?.moved || false,
       }, req.ip);
       return res.json({ success: true, data: result });
     } catch (error) {
@@ -297,6 +373,7 @@ router.post(
       }
 
       const receipt = await prisma.$transaction(async (tx) => {
+        await assertUniqueTransactionId(tx, tenantId, input.transactionId);
         const booking = await tx.booking.findFirst({
           where: { id: input.bookingId, tenantId, leadId: lead.id, status: 'RESERVED' },
           include: {
@@ -344,7 +421,7 @@ router.post(
             receivedFrom: input.receivedFrom,
             amount: input.amount,
             paymentMode: input.paymentMode,
-            transactionId: input.transactionId || null,
+            transactionId: input.transactionId,
             receivedDate: dateAtNoonUtc(input.receivedDate),
             kind: 'MIS_SUBMISSION',
             approvalStatus: 'PENDING_APPROVAL',
@@ -388,6 +465,12 @@ router.post(
       if (error instanceof Error && error.message === 'RECEIPT_EXCEEDS_BALANCE') {
         return res.status(409).json({ success: false, error: 'Receipt amount exceeds the remaining quotation balance' });
       }
+      if (
+        (error instanceof Error && error.message === 'DUPLICATE_TRANSACTION_ID')
+        || isTransactionIdUniqueConflict(error)
+      ) {
+        return res.status(409).json({ success: false, field: 'transactionId', error: 'This transaction ID has already been used in this tenant' });
+      }
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
         return res.status(409).json({ success: false, error: 'The payment balance changed. Refresh the receipt and try again.' });
       }
@@ -417,6 +500,7 @@ router.post(
       }
 
       const receipt = await prisma.$transaction(async (tx) => {
+        await assertUniqueTransactionId(tx, tenantId, input.transactionId);
         const booking = await tx.booking.findFirst({
           where: { id: req.params.bookingId, tenantId, leadId: lead.id, status: { in: ['RESERVED', 'BOOKED'] } },
           include: { quotation: { select: { totalPrice: true, paymentPlan: true } } },
@@ -442,7 +526,12 @@ router.post(
           },
           select: { amount: true, kind: true, installmentIndex: true, receivedDate: true },
         });
-        const alreadyPaid = paidReceipts.reduce((total, receipt) => total + receipt.amount, 0);
+        const approvedRefunds = await tx.refundRequest.aggregate({
+          where: { tenantId, bookingId: booking.id, status: 'APPROVED' },
+          _sum: { amount: true },
+        });
+        const refundedAmount = approvedRefunds._sum.amount || 0;
+        const alreadyPaid = Math.max(0, paidReceipts.reduce((total, receipt) => total + receipt.amount, 0) - refundedAmount);
         const remainingBalance = Math.max(0, booking.quotation.totalPrice - alreadyPaid);
         if (remainingBalance <= 0.005) throw new Error('BALANCE_ALREADY_PAID');
         if (input.amount > remainingBalance + 0.005) throw new Error('RECEIPT_EXCEEDS_BALANCE');
@@ -451,6 +540,12 @@ router.post(
           const installment = installments.find((item) => item.index === input.installmentIndex);
           if (!installment) throw new Error('INSTALLMENT_NOT_FOUND');
           const paidByInstallment = getInstallmentPaidAmounts(installments, paidReceipts);
+          let refundToAllocate = refundedAmount;
+          for (let index = paidByInstallment.length - 1; index >= 0 && refundToAllocate > 0.005; index -= 1) {
+            const reduction = Math.min(paidByInstallment[index], refundToAllocate);
+            paidByInstallment[index] -= reduction;
+            refundToAllocate -= reduction;
+          }
           const installmentBalance = Math.max(0, installment.amount - (paidByInstallment[input.installmentIndex] || 0));
           if (installmentBalance <= 0.005) throw new Error('INSTALLMENT_ALREADY_PAID');
           if (input.amount > installmentBalance + 0.005) throw new Error('RECEIPT_EXCEEDS_INSTALLMENT');
@@ -473,7 +568,7 @@ router.post(
             receivedFrom: input.receivedFrom,
             amount: input.amount,
             paymentMode: input.paymentMode,
-            transactionId: input.transactionId || null,
+            transactionId: input.transactionId,
             receivedDate: dateAtNoonUtc(input.receivedDate),
             kind: 'CRM_PAYMENT',
             approvalStatus: 'ISSUED',
@@ -526,11 +621,263 @@ router.post(
       if (error instanceof Error && error.message === 'RECEIPT_EXCEEDS_BALANCE') {
         return res.status(409).json({ success: false, error: 'Payment exceeds the remaining quotation balance' });
       }
+      if (
+        (error instanceof Error && error.message === 'DUPLICATE_TRANSACTION_ID')
+        || isTransactionIdUniqueConflict(error)
+      ) {
+        return res.status(409).json({ success: false, field: 'transactionId', error: 'This transaction ID has already been used in this tenant' });
+      }
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
         return res.status(409).json({ success: false, error: 'The payment balance changed. Refresh and try again.' });
       }
       console.error('Failed to create CRM customer receipt:', error);
       return res.status(500).json({ success: false, error: 'Failed to create customer receipt' });
+    }
+  },
+);
+
+router.get(
+  '/lead/:leadId/refunds',
+  authenticate,
+  authorize('Lead', 'read'),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const { tenantId } = req.user!;
+      const lead = await prisma.lead.findFirst({
+        where: { id: req.params.leadId, tenantId },
+        select: { id: true, tenantId: true, ownerId: true, creatorId: true },
+      });
+      if (!lead) return res.status(404).json({ success: false, error: 'Lead not found' });
+      if (!(await canAccessLead(req.user!, lead))) {
+        return res.status(403).json({ success: false, error: 'You do not have access to this lead' });
+      }
+      const refunds = await prisma.refundRequest.findMany({
+        where: { tenantId, leadId: lead.id },
+        include: getRefundDetails,
+        orderBy: [{ submittedAt: 'desc' }, { createdAt: 'desc' }],
+      });
+      return res.json({ success: true, data: refunds });
+    } catch (error) {
+      console.error('Failed to fetch refund requests:', error);
+      return res.status(500).json({ success: false, error: 'Failed to fetch refund requests' });
+    }
+  },
+);
+
+router.post(
+  '/lead/:leadId/refunds',
+  authenticate,
+  authorizeEffectivePermission('CRM_RECEIPT_CREATE'),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const input = refundRequestSchema.parse(req.body);
+      const { tenantId, id: userId } = req.user!;
+      const lead = await prisma.lead.findFirst({
+        where: { id: req.params.leadId, tenantId },
+        select: { id: true, tenantId: true, ownerId: true, creatorId: true },
+      });
+      if (!lead) return res.status(404).json({ success: false, error: 'Lead not found' });
+      if (!(await canAccessLead(req.user!, lead))) {
+        return res.status(403).json({ success: false, error: 'You do not have access to this lead' });
+      }
+
+      const result = await prisma.$transaction(async (tx) => {
+        const existingKey = await tx.refundRequest.findFirst({
+          where: { tenantId, requestKey: input.requestKey },
+          include: getRefundDetails,
+        });
+        if (existingKey) {
+          const sameRequest = existingKey.leadId === lead.id
+            && existingKey.bookingId === input.bookingId
+            && existingKey.customerName === input.customerName
+            && existingKey.customerPhone === (input.customerPhone || null)
+            && existingKey.customerEmail === (input.customerEmail || null)
+            && existingKey.amount === input.amount
+            && existingKey.reason === input.reason
+            && existingKey.refundReference === input.refundReference;
+          if (!sameRequest) throw new Error('IDEMPOTENCY_KEY_REUSED');
+          return { refund: existingKey, created: false };
+        }
+
+        const booking = await tx.booking.findFirst({
+          where: { id: input.bookingId, tenantId, leadId: lead.id, status: { in: ['BOOKED', 'CONFIRMED'] } },
+          select: { id: true },
+        });
+        if (!booking) throw new Error('REFUND_ELIGIBLE_BOOKING_REQUIRED');
+
+        const duplicateReference = await tx.refundRequest.findFirst({
+          where: { tenantId, refundReference: input.refundReference },
+          select: { id: true },
+        });
+        if (duplicateReference) throw new Error('DUPLICATE_REFUND_REFERENCE');
+
+        const [paidAmount, priorRefunds] = await Promise.all([
+          getPaidAmount(tx, tenantId, booking.id),
+          tx.refundRequest.aggregate({
+            where: {
+              tenantId,
+              bookingId: booking.id,
+              status: { in: ['PENDING_APPROVAL', 'APPROVED'] },
+            },
+            _sum: { amount: true },
+          }),
+        ]);
+        const available = Math.max(0, paidAmount - (priorRefunds._sum.amount || 0));
+        if (input.amount > available + 0.005) throw new Error('REFUND_EXCEEDS_BALANCE');
+
+        const refund = await tx.refundRequest.create({
+          data: {
+            tenantId,
+            leadId: lead.id,
+            bookingId: booking.id,
+            createdById: userId,
+            requestKey: input.requestKey,
+            customerName: input.customerName,
+            customerPhone: input.customerPhone || null,
+            customerEmail: input.customerEmail || null,
+            amount: input.amount,
+            reason: input.reason,
+            refundReference: input.refundReference,
+            status: 'PENDING_APPROVAL',
+          },
+          include: getRefundDetails,
+        });
+        return { refund, created: true };
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+
+      if (result.created) {
+        await auditLog(tenantId, userId, 'CREATE', 'RefundRequest', result.refund.id, undefined, {
+          bookingId: result.refund.bookingId,
+          amount: result.refund.amount,
+          refundReference: result.refund.refundReference,
+          status: result.refund.status,
+        }, req.ip);
+      }
+      return res.status(result.created ? 201 : 200).json({ success: true, data: result.refund });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({
+          success: false,
+          field: error.issues[0]?.path.join('.'),
+          error: error.issues[0]?.message || 'Invalid refund request',
+        });
+      }
+      if (error instanceof Error && error.message === 'REFUND_ELIGIBLE_BOOKING_REQUIRED') {
+        return res.status(409).json({ success: false, error: 'A MIS-approved booking is required to request a refund' });
+      }
+      if (error instanceof Error && error.message === 'REFUND_EXCEEDS_BALANCE') {
+        return res.status(409).json({ success: false, error: 'Refund amount exceeds the remaining approved payment balance' });
+      }
+      if (error instanceof Error && error.message === 'DUPLICATE_REFUND_REFERENCE') {
+        return res.status(409).json({ success: false, field: 'refundReference', error: 'This refund reference has already been used in this tenant' });
+      }
+      if (error instanceof Error && error.message === 'IDEMPOTENCY_KEY_REUSED') {
+        return res.status(409).json({ success: false, field: 'requestKey', error: 'This request key was already used for different refund details' });
+      }
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
+        return res.status(409).json({ success: false, error: 'The payment balance changed. Refresh and try again.' });
+      }
+      console.error('Failed to create refund request:', error);
+      return res.status(500).json({ success: false, error: 'Failed to create refund request' });
+    }
+  },
+);
+
+router.get(
+  '/approvals/refunds',
+  authenticate,
+  requireMISReviewer,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const refunds = await prisma.refundRequest.findMany({
+        where: { tenantId: req.user!.tenantId },
+        include: getRefundDetails,
+        orderBy: [{ submittedAt: 'desc' }, { createdAt: 'desc' }],
+        take: 100,
+      });
+      return res.json({ success: true, data: refunds });
+    } catch (error) {
+      console.error('Failed to fetch MIS refund requests:', error);
+      return res.status(500).json({ success: false, error: 'Failed to fetch refund requests' });
+    }
+  },
+);
+
+router.post(
+  '/approvals/refunds/:refundId/review',
+  authenticate,
+  requireMISReviewer,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const input = refundReviewSchema.parse(req.body);
+      const { tenantId, id: reviewerId } = req.user!;
+      const refund = await prisma.$transaction(async (tx) => {
+        const request = await tx.refundRequest.findFirst({
+          where: { id: req.params.refundId, tenantId },
+        });
+        if (!request) throw new Error('REFUND_NOT_FOUND');
+        if (request.status !== 'PENDING_APPROVAL') throw new Error('REFUND_ALREADY_REVIEWED');
+
+        if (input.decision === 'APPROVE') {
+          const [paidAmount, approvedRefunds] = await Promise.all([
+            getPaidAmount(tx, tenantId, request.bookingId),
+            tx.refundRequest.aggregate({
+              where: {
+                tenantId,
+                bookingId: request.bookingId,
+                status: 'APPROVED',
+                id: { not: request.id },
+              },
+              _sum: { amount: true },
+            }),
+          ]);
+          if ((approvedRefunds._sum.amount || 0) + request.amount > paidAmount + 0.005) {
+            throw new Error('REFUND_EXCEEDS_PAID_BALANCE');
+          }
+        }
+
+        const updated = await tx.refundRequest.updateMany({
+          where: { id: request.id, tenantId, status: 'PENDING_APPROVAL' },
+          data: {
+            status: input.decision === 'APPROVE' ? 'APPROVED' : 'REJECTED',
+            reviewedAt: new Date(),
+            reviewedById: reviewerId,
+            reviewNote: input.note || null,
+          },
+        });
+        if (updated.count !== 1) throw new Error('REFUND_ALREADY_REVIEWED');
+        return tx.refundRequest.findFirst({
+          where: { id: request.id, tenantId },
+          include: getRefundDetails,
+        });
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+      if (!refund) throw new Error('REFUND_NOT_FOUND');
+
+      await auditLog(tenantId, reviewerId, 'UPDATE', 'RefundRequest', refund.id, undefined, {
+        status: refund.status,
+        amount: refund.amount,
+        refundReference: refund.refundReference,
+        reviewNote: refund.reviewNote,
+      }, req.ip);
+      return res.json({ success: true, data: refund });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ success: false, error: error.issues[0]?.message || 'Invalid review details' });
+      }
+      if (error instanceof Error && error.message === 'REFUND_NOT_FOUND') {
+        return res.status(404).json({ success: false, error: 'Refund request not found' });
+      }
+      if (error instanceof Error && error.message === 'REFUND_ALREADY_REVIEWED') {
+        return res.status(409).json({ success: false, error: 'This refund request has already been reviewed' });
+      }
+      if (error instanceof Error && error.message === 'REFUND_EXCEEDS_PAID_BALANCE') {
+        return res.status(409).json({ success: false, error: 'Approved refunds would exceed the confirmed paid balance' });
+      }
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
+        return res.status(409).json({ success: false, error: 'The refund balance changed. Refresh and try again.' });
+      }
+      console.error('Failed to review refund request:', error);
+      return res.status(500).json({ success: false, error: 'Failed to review refund request' });
     }
   },
 );
@@ -572,6 +919,10 @@ router.get(
         ? null
         : getInstallments(receipt.booking.quotation.paymentPlan, receipt.booking.quotation.totalPrice)
           .find((installment) => installment.index === receipt.installmentIndex);
+      const tenant = await prisma.tenant.findFirst({
+        where: { id: tenantId },
+        select: { logo: true },
+      });
       const safeNumber = receipt.receiptNumber.replace(/[^A-Za-z0-9_-]/g, '-');
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `attachment; filename="${safeNumber}.pdf"`);
@@ -583,38 +934,50 @@ router.get(
       });
       document.pipe(res);
 
+      const logo = companyLogo(tenant?.logo);
+      if (logo) document.image(logo, 55, 42, { fit: [42, 42], align: 'center', valign: 'center' });
       document.font('Helvetica-Bold').fontSize(20).fillColor('#b42332')
-        .text('PAYMENT RECEIPT', 55, 48, { align: 'center' });
+        .text('PAYMENT RECEIPT', logo ? 105 : 55, 48, { width: logo ? 385 : 485, align: 'center' });
       document.font('Helvetica').fontSize(9).fillColor('#475569')
         .text(receipt.booking.project.name, 55, 76, { align: 'center' });
       const address = [receipt.booking.project.address, receipt.booking.project.city].filter(Boolean).join(', ');
       if (address) document.text(address, 55, 90, { align: 'center' });
       document.moveTo(55, 115).lineTo(540, 115).strokeColor('#cbd5e1').stroke();
 
-      const rows: Array<[string, string]> = [
+      const rows: Array<[string, string, boolean?]> = [
         ['Receipt No.', receipt.receiptNumber],
         ['Booking No.', receipt.booking.bookingNumber],
         ['Date', pdfDate(receipt.receiptDate)],
         ['Project Name', receipt.booking.project.name],
         ['Received with thanks from', receipt.receivedFrom],
         ['Installment', linkedInstallment?.milestone || 'General payment'],
-        ['For the sum of Rupees', `${money(receipt.amount)} (${receipt.amount.toLocaleString('en-IN')} only)`],
+        ['For the sum of Rupees', `${money(receipt.amount)} (${money(receipt.amount)} only)`, true],
         ['Towards Plot No.', receipt.booking.unit.number],
         ['Area', receipt.booking.unit.area ? `${receipt.booking.unit.area.toLocaleString('en-IN')} sq ft` : '—'],
-        ['Rate', money(receipt.booking.quotation.pricePerSqFt)],
-        ['Amount', money(receipt.amount)],
+        ['Rate', money(receipt.booking.quotation.pricePerSqFt), true],
+        ['Amount', money(receipt.amount), true],
         ['Mode', receipt.paymentMode],
         ['Transaction ID', receipt.transactionId || '—'],
         ['Received Date', pdfDate(receipt.receivedDate)],
       ];
       let y = 145;
-      for (const [label, value] of rows) {
+      const drawRupee = (x: number, top: number) => {
+        document.save().lineWidth(0.9).strokeColor('#111827');
+        document.moveTo(x, top + 1).lineTo(x + 8, top + 1);
+        document.moveTo(x, top + 4).lineTo(x + 7, top + 4);
+        document.moveTo(x + 3, top + 4).lineTo(x + 3, top + 8)
+          .bezierCurveTo(x + 3, top + 12, x + 7, top + 14, x + 9, top + 17)
+          .lineTo(x + 1, top + 20);
+        document.stroke().restore();
+      };
+      for (const [label, value, isCurrency] of rows) {
         if (y > 690) {
           document.addPage();
           y = 60;
         }
         document.font('Helvetica').fontSize(10).fillColor('#334155').text(label, 75, y, { width: 190 });
-        document.font('Helvetica-Bold').fontSize(10).fillColor('#111827').text(value, 275, y, { width: 250 });
+        if (isCurrency) drawRupee(275, y);
+        document.font('Helvetica-Bold').fontSize(10).fillColor('#111827').text(value, isCurrency ? 287 : 275, y, { width: isCurrency ? 238 : 250 });
         document.moveTo(75, y + 22).lineTo(525, y + 22).strokeColor('#edf0f4').stroke();
         y += 37;
       }

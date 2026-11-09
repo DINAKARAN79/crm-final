@@ -18,7 +18,7 @@ import { Button } from "@/components/ui/button";
 
 import { LeadList, Lead } from "@/components/crm/lead-list";
 
-import { Plus, AlertCircle, Link2, Layers3, UsersRound } from "lucide-react";
+import { Plus, AlertCircle, ChevronLeft, ChevronRight, Link2, Layers3, UsersRound } from "lucide-react";
 import { CommonFilterPanel, FilterDate, FilterSearch, FilterSelect } from "@/components/crm/common-filter-panel";
 import { useListView } from "@/components/crm/list-view-control";
 import { subscribeToLeadListUpdates } from "@/lib/lead-list-events";
@@ -34,8 +34,16 @@ const SOURCE_OPTIONS = [
   { label: "Walk-in", value: "WALK_IN" },
 ];
 
-function mapApiLeadToLead(apiLead: any, maskNumbers: boolean): Lead {
+function mapApiLeadToLead(apiLead: any, maskNumbers: boolean, bookedBucketView = false): Lead {
   const statusLower = (apiLead.status || "NEW").toLowerCase();
+  const ownerName = apiLead.owner
+    ? [apiLead.owner.firstName, apiLead.owner.lastName].filter(Boolean).join(" ")
+    : "";
+  const bookedByName = apiLead.bookedBy
+    ? [apiLead.bookedBy.firstName, apiLead.bookedBy.lastName].filter(Boolean).join(" ")
+    : apiLead.bookings?.[0]?.owner
+      ? [apiLead.bookings[0].owner.firstName, apiLead.bookings[0].owner.lastName].filter(Boolean).join(" ")
+      : "";
   return {
     id: apiLead.id,
     leadNumber: apiLead.leadNumber || "",
@@ -51,11 +59,14 @@ function mapApiLeadToLead(apiLead: any, maskNumbers: boolean): Lead {
     status: statusLower,
     statusLabel: apiLead.statusLabel || statusLower.replaceAll("_", " "),
     rating: apiLead.rating || "",
-    assignedTo: statusLower === "booked"
+    assignedTo: bookedBucketView
+      ? ownerName
+      : statusLower === "booked"
       ? "Booked"
-      : apiLead.owner
-      ? `${apiLead.owner.firstName} ${apiLead.owner.lastName}`
-      : "",
+      : ownerName,
+    bookedBy: bookedByName,
+    projectName: apiLead.project?.name || "",
+    bookedAt: apiLead.bookings?.[0]?.createdAt || "",
     createdAt: apiLead.createdAt,
     updatedAt: apiLead.updatedAt,
   };
@@ -80,6 +91,18 @@ export default function LeadsPage() {
   const [sourceFilter, setSourceFilter] = React.useState("");
   const [dateFrom, setDateFrom] = React.useState("");
   const [dateTo, setDateTo] = React.useState("");
+  const [canViewBookedBucket, setCanViewBookedBucket] = React.useState(false);
+  const [bookedBucketView, setBookedBucketView] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!user?.id) return;
+    leadApi.bookedBucketAccess()
+      .then((response) => setCanViewBookedBucket(Boolean(response.data.data?.canView)))
+      .catch((error: unknown) => {
+        console.error("Failed to load Booked Bucket access:", error);
+        toast({ title: "Unable to check Booked Bucket access", variant: "destructive" });
+      });
+  }, [toast, user?.id]);
 
   React.useEffect(() => {
     const timer = setTimeout(() => {
@@ -127,6 +150,7 @@ export default function LeadsPage() {
         page: currentPage,
         limit: 20,
       };
+      if (bookedBucketView) params.bookedBucket = "true";
       if (debouncedSearch) params.search = debouncedSearch;
       if (statusFilter) params.status = statusFilter;
       if (sourceFilter) params.source = sourceFilter;
@@ -138,7 +162,7 @@ export default function LeadsPage() {
         const items = Array.isArray(res.data.data)
           ? res.data.data
           : res.data.data.leads || [];
-        setLeads(items.map((item: any) => mapApiLeadToLead(item, maskNumbers)));
+        setLeads(items.map((item: any) => mapApiLeadToLead(item, maskNumbers, bookedBucketView)));
         setTotalItems(res.data.pagination?.total || items.length);
       } else {
         setError(res.data.error || "Failed to load leads");
@@ -148,7 +172,7 @@ export default function LeadsPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [currentPage, debouncedSearch, statusFilter, sourceFilter, dateFrom, dateTo, listViews.ready, listViews.queryKey, maskNumbers]);
+  }, [currentPage, debouncedSearch, statusFilter, sourceFilter, dateFrom, dateTo, listViews.ready, listViews.queryKey, maskNumbers, bookedBucketView]);
 
   React.useEffect(() => {
     fetchLeads();
@@ -174,6 +198,7 @@ export default function LeadsPage() {
   const handlePageChange = (page: number) => {
     setCurrentPage(page);
   };
+  const totalPages = Math.max(1, Math.ceil(totalItems / 20));
 
   return (
     <div className="space-y-4">
@@ -182,12 +207,24 @@ export default function LeadsPage() {
         title="Leads"
         subtitle="Manage your leads and track their progress"
         view={listViews.control}
-        actions={canCreateLead ? (
-          <Button className={`${listPageActionClassName} bg-gradient-to-r from-blue-600 to-blue-500 text-white shadow-sm shadow-blue-200 hover:from-blue-700 hover:to-blue-600`} onClick={() => router.push("/leads/new")}>
-            <Plus className="h-4 w-4" />
-            Create Lead
-          </Button>
-        ) : null}
+        actions={(
+          <div className="flex flex-wrap gap-2">
+            {canViewBookedBucket && (
+              <Button type="button" variant={bookedBucketView ? "default" : "outline"} onClick={() => {
+                setBookedBucketView((current) => !current);
+                setCurrentPage(1);
+              }}>
+                {bookedBucketView ? "All Leads" : "Booked Bucket"}
+              </Button>
+            )}
+            {canCreateLead && (
+              <Button className={`${listPageActionClassName} bg-gradient-to-r from-blue-600 to-blue-500 text-white shadow-sm shadow-blue-200 hover:from-blue-700 hover:to-blue-600`} onClick={() => router.push("/leads/new")}>
+                <Plus className="h-4 w-4" />
+                Create Lead
+              </Button>
+            )}
+          </div>
+        )}
       />
 
       {listViews.dialog}
@@ -255,8 +292,42 @@ export default function LeadsPage() {
         />
       </CommonFilterPanel>
 
+      {totalItems > 0 && (
+        <div className="flex items-center justify-between gap-3 rounded-lg border bg-white px-3 py-2 text-sm text-muted-foreground">
+          <span>
+            Showing {(currentPage - 1) * 20 + 1}–{Math.min(currentPage * 20, totalItems)} of {totalItems} Leads
+          </span>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => handlePageChange(currentPage - 1)}
+              disabled={currentPage <= 1 || isLoading}
+              aria-label="Previous Leads page"
+            >
+              <ChevronLeft className="h-4 w-4" />
+              Previous
+            </Button>
+            <span className="min-w-20 text-center">Page {currentPage} of {totalPages}</span>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => handlePageChange(currentPage + 1)}
+              disabled={currentPage >= totalPages || isLoading}
+              aria-label="Next Leads page"
+            >
+              Next
+              <ChevronRight className="h-4 w-4" />
+            </Button>
+          </div>
+        </div>
+      )}
+
       <LeadList
         leads={leads}
+        bookedBucketView={bookedBucketView}
         isLoading={isLoading}
         totalItems={totalItems}
         currentPage={currentPage}

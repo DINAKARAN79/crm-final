@@ -16,6 +16,7 @@ export async function createOwnerHistory(
     previousStatus: string | null;
     newStatus: string | null;
     handoffReason: string;
+    source?: string | null;
     changedById: string;
   },
   db: DbClient = prisma,
@@ -47,6 +48,7 @@ export async function createOwnerHistory(
       previousStatus: params.previousStatus,
       newStatus: params.newStatus,
       handoffReason: params.handoffReason,
+      source: params.source ?? null,
       changedById: params.changedById,
       startDate: now,
       endDate: null,

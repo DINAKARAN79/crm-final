@@ -1,4 +1,5 @@
 import { prisma } from '@dct-crm/db';
+import { getTenantTimezone } from './tenantTimezone';
 import type { AuthRequest } from '../middleware/auth';
 import {
   compileListFilters,
@@ -169,7 +170,8 @@ export async function listViewConstraint(req: AuthRequest, module: ListModule) {
         select: { recordId: true },
       })).map((row) => row.recordId)
     : [];
-  return { ok: true as const, where: compileListFilters(module, filters, { userId: actor.id, recentIds, presets }) };
+  const timeZone = await getTenantTimezone(actor.tenantId);
+  return { ok: true as const, where: compileListFilters(module, filters, { userId: actor.id, recentIds, presets, timeZone }) };
 }
 
 export function mergeListWhere(where: object, extra: Record<string, unknown> | null) {

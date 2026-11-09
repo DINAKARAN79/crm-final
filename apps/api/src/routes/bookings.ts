@@ -10,7 +10,10 @@ import { listOrderBy, listViewConstraint, mergeListWhere } from '../services/lis
 import { authorize, authorizeEffectivePermission } from '../middleware/authorization';
 import { auditLog } from '../middleware/audit';
 import { canAccessLead } from '../services/recordAccess';
+import { moveLeadToBookedBucket } from '../services/bookedBucket';
 import { withImpersonatorNames } from '../services/impersonation';
+import { createOwnerHistory } from '../services/ownerHistory';
+import { appendLeadProcessNote } from '../services/leadNotes';
 import { BOOKING_DETAIL_FIELDS, INDIAN_STATES, ORGANIZATION_TYPES, PAN_PATTERN } from '@dct-crm/shared';
 
 const router = Router();
@@ -155,7 +158,16 @@ router.get(
       const bookings = await prisma.booking.findMany({
         where,
         include: {
-          lead: { select: { id: true, leadNumber: true, firstName: true, lastName: true, owner: { select: { id: true, firstName: true, lastName: true } } } },
+          lead: {
+            select: {
+              id: true,
+              leadNumber: true,
+              firstName: true,
+              lastName: true,
+              owner: { select: { id: true, firstName: true, lastName: true } },
+              bookedBy: { select: { id: true, firstName: true, lastName: true } },
+            },
+          },
           quotation: true,
           project: { select: { id: true, name: true, address: true, city: true } },
           unit: { select: { id: true, number: true, type: true, area: true, status: true } },
@@ -212,6 +224,7 @@ const BOOKING_STAGES = [
 const stageSchema = z.object({ stage: z.enum(BOOKING_STAGES).refine((value) => value !== 'CANCELLED', 'Cancellation requires MIS approval') });
 const cancelRequestSchema = z.object({ notes: z.string().trim().min(3).max(1000) });
 const cancelReviewSchema = z.object({ decision: z.enum(['APPROVE', 'REJECT']), note: z.string().trim().max(1000).optional() });
+const bookingNoteSchema = z.object({ note: z.string().trim().min(1).max(5000) });
 
 const requireMisReviewer = (req: AuthRequest, res: Response, next: () => void) => {
   const isMis = /^mis(?:\s|$)/i.test(req.user?.profileName?.trim() || '');
@@ -297,10 +310,10 @@ router.post(
       const { decision, note } = cancelReviewSchema.parse(req.body);
       const { tenantId, id: userId } = req.user!;
       const approve = decision === 'APPROVE';
-      await prisma.$transaction(async (tx) => {
+      const cancellationResult = await prisma.$transaction(async (tx) => {
         const booking = await tx.booking.findFirst({
           where: { id: req.params.bookingId, tenantId, cancellationStatus: 'PENDING' },
-          select: { id: true, unitId: true },
+          select: { id: true, unitId: true, leadId: true },
         });
         if (!booking) throw new Error('NO_PENDING_REQUEST');
         const claimed = await tx.booking.updateMany({
@@ -319,7 +332,69 @@ router.post(
             where: { id: booking.unitId, tenantId, status: { in: ['RESERVED', 'BOOKED'] } },
             data: { status: 'AVAILABLE' },
           });
+          const bucketSetting = await tx.bookedBucketSetting.findUnique({
+            where: { tenantId },
+            select: { returnToPreviousOwnerOnCancel: true },
+          });
+          if (bucketSetting?.returnToPreviousOwnerOnCancel) {
+            const lead = await tx.lead.findFirst({
+              where: { id: booking.leadId, tenantId, status: 'BOOKED' },
+              select: {
+                id: true,
+                leadNumber: true,
+                ownerId: true,
+                bookedById: true,
+                status: true,
+                owner: { select: { profile: { select: { name: true } } } },
+              },
+            });
+            const previousOwner = lead?.bookedById
+              ? await tx.user.findFirst({
+                  where: { id: lead.bookedById, tenantId, isActive: true },
+                  select: { id: true, profile: { select: { name: true } } },
+                })
+              : null;
+            if (lead && previousOwner && lead.ownerId !== previousOwner.id) {
+              await tx.lead.update({
+                where: { id: lead.id },
+                data: { ownerId: previousOwner.id },
+              });
+              await createOwnerHistory({
+                tenantId,
+                leadId: lead.id,
+                previousOwnerId: lead.ownerId,
+                newOwnerId: previousOwner.id,
+                previousProfile: lead.owner?.profile?.name ?? null,
+                newProfile: previousOwner.profile?.name ?? null,
+                previousStatus: lead.status,
+                newStatus: lead.status,
+                handoffReason: 'Returned to previous owner after booking cancellation',
+                source: 'booking_cancel',
+                changedById: userId,
+              }, tx);
+              await tx.auditLog.create({
+                data: {
+                  tenantId,
+                  userId,
+                  leadId: lead.id,
+                  action: 'BOOKED_BUCKET_OWNER_RETURNED_AFTER_CANCELLATION',
+                  objectType: 'Lead',
+                  objectId: lead.id,
+                  oldValues: { ownerId: lead.ownerId },
+                  newValues: { ownerId: previousOwner.id, source: 'booking_cancel' },
+                },
+              });
+              await appendLeadProcessNote(tx, {
+                tenantId,
+                leadId: lead.id,
+                userId,
+                content: `Lead ${lead.leadNumber} returned to its previous owner after booking cancellation.`,
+              });
+              return { ownerReturned: true, ownerId: previousOwner.id };
+            }
+          }
         }
+        return { ownerReturned: false, ownerId: null };
       });
       await auditLog(
         tenantId,
@@ -336,7 +411,7 @@ router.post(
         approve ? 'Booking cancelled by MIS' : 'Booking cancellation rejected by MIS',
         approve ? 'MIS verified the cancellation. Booking cancelled and the unit marked Available.' : `MIS rejected the cancellation request.${note ? ` Note: ${note}` : ''}`,
       );
-      return res.json({ success: true });
+      return res.json({ success: true, data: cancellationResult });
     } catch (error) {
       if (error instanceof z.ZodError) return res.status(400).json({ success: false, error: 'Invalid review decision' });
       if (error instanceof Error && error.message === 'NO_PENDING_REQUEST') {
@@ -460,7 +535,16 @@ router.get(
       const booking = await prisma.booking.findFirst({
         where: { id: req.params.bookingId, tenantId: req.user!.tenantId },
         include: {
-          lead: { select: { id: true, leadNumber: true, firstName: true, lastName: true, owner: { select: { id: true, firstName: true, lastName: true } } } },
+          lead: {
+            select: {
+              id: true,
+              leadNumber: true,
+              firstName: true,
+              lastName: true,
+              owner: { select: { id: true, firstName: true, lastName: true } },
+              bookedBy: { select: { id: true, firstName: true, lastName: true } },
+            },
+          },
           quotation: true,
           project: { select: { id: true, name: true, address: true, city: true } },
           unit: { select: { id: true, number: true, type: true, area: true, status: true } },
@@ -577,6 +661,43 @@ router.patch(
   },
 );
 
+router.post(
+  '/:bookingId/notes',
+  authenticate,
+  requireAdminOrCrm,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const { note } = bookingNoteSchema.parse(req.body);
+      const { tenantId, id: userId } = req.user!;
+      const booking = await prisma.booking.findFirst({
+        where: { id: req.params.bookingId, tenantId },
+        select: { id: true, leadId: true },
+      });
+      if (!booking) return res.status(404).json({ success: false, error: 'Booking not found' });
+
+      const activity = await prisma.activity.create({
+        data: {
+          tenantId,
+          bookingId: booking.id,
+          leadId: booking.leadId,
+          userId,
+          type: 'NOTE',
+          subject: 'Booking Note',
+          description: note,
+          status: 'COMPLETED',
+          completedAt: new Date(),
+        },
+        include: { user: { select: { id: true, firstName: true, lastName: true } } },
+      });
+      return res.status(201).json({ success: true, data: activity });
+    } catch (error) {
+      if (error instanceof z.ZodError) return res.status(400).json({ success: false, error: 'Invalid booking note' });
+      console.error('Failed to add booking note:', error);
+      return res.status(500).json({ success: false, error: 'Failed to add booking note' });
+    }
+  },
+);
+
 router.get(
   '/lead/:leadId',
   authenticate,
@@ -667,6 +788,7 @@ router.post(
           where: { id: lead.id },
           data: { status: 'BOOKED' },
         });
+        await moveLeadToBookedBucket(lead.id, 'booking', tx, userId);
         await tx.activity.create({
           data: {
             tenantId,
@@ -842,7 +964,7 @@ router.get(
       if (!booking) return res.status(404).json({ success: false, error: 'Booking not found' });
       const tenant = await prisma.tenant.findFirst({
         where: { id: tenantId },
-        select: { name: true, logo: true, email: true, phone: true, website: true, address: true, city: true, state: true, country: true, postalCode: true },
+        select: { name: true, logo: true, email: true, phone: true, website: true, address: true, city: true, state: true, country: true, postalCode: true, timezone: true },
       });
 
       const fileName = `${booking.bookingNumber.replace(/[^A-Za-z0-9_-]/g, '-')}.pdf`;
@@ -891,6 +1013,7 @@ router.get(
         bookingAmount: booking.bookingAmount,
         quotationNumber: booking.quotation.quotationNumber,
         quotationDate: booking.quotation.confirmedAt || booking.createdAt,
+        timeZone: tenant?.timezone,
         status: bookingStatusLabel(booking.status),
         customerName,
         customerPhone: typeof firstApplicant.mobileNumber === 'string' ? firstApplicant.mobileNumber : null,

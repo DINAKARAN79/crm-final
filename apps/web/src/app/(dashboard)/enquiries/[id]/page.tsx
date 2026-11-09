@@ -8,6 +8,7 @@ import { enquiryApi } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { RecordPageHeader } from "@/components/crm/record-page-header";
+import { formatDateTime } from "@/lib/date-format";
 
 type EnquiryDetail = {
   id: string;
@@ -43,7 +44,7 @@ function personName(person?: { firstName: string; lastName: string } | null) {
 }
 
 function displayDate(value?: string | null) {
-  return value ? new Date(value).toLocaleString() : "—";
+  return value ? formatDateTime(value) : "—";
 }
 
 function formatLeadTypeLabel(leadType?: string | null) {

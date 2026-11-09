@@ -23,6 +23,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { isSiteVisitStatusColumn, reportStatusCell, siteVisitStatusLabel } from "@/components/crm/site-visit-status-badge";
 import { useAuth } from "@/contexts/auth-context";
+import { dateKey, formatDateOnly, formatDateShort } from "@/lib/date-format";
 
 interface Field {
   key: string;
@@ -255,20 +256,28 @@ function validateFilterExpression(expression: string, filterCount: number): stri
 }
 
 function relativeDateSummary(operator: string): string {
-  const today = new Date();
-  const format = (date: Date) => date.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
-  if (operator === "today") return `Today (${format(today)})`;
-  if (operator === "thisMonth") return `This Month (${format(new Date(today.getFullYear(), today.getMonth(), 1))} - ${format(new Date(today.getFullYear(), today.getMonth() + 1, 0))})`;
-  if (operator === "lastMonth") return `Last Month (${format(new Date(today.getFullYear(), today.getMonth() - 1, 1))} - ${format(new Date(today.getFullYear(), today.getMonth(), 0))})`;
-  if (operator === "thisYear") return `This Year (${format(new Date(today.getFullYear(), 0, 1))} - ${format(new Date(today.getFullYear(), 11, 31))})`;
+  const [year, month] = dateKey(new Date()).split("-").map(Number);
+  const firstDay = (y: number, m: number) => `${y}-${String(m).padStart(2, "0")}-01`;
+  const lastDay = (y: number, m: number) => new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10);
+  const today = dateKey(new Date());
+  if (operator === "today") return `Today (${formatDateOnly(today)})`;
+  if (operator === "thisMonth") return `This Month (${formatDateOnly(firstDay(year, month))} - ${formatDateOnly(lastDay(year, month))})`;
+  if (operator === "lastMonth") {
+    const previous = new Date(Date.UTC(year, month - 2, 1));
+    const y = previous.getUTCFullYear();
+    const m = previous.getUTCMonth() + 1;
+    return `Last Month (${formatDateOnly(firstDay(y, m))} - ${formatDateOnly(lastDay(y, m))})`;
+  }
+  if (operator === "thisYear") return `This Year (${formatDateOnly(firstDay(year, 1))} - ${formatDateOnly(`${year}-12-31`)})`;
   return relativeDateOperators.find((item) => item.value === operator)?.label || operator;
 }
 
 function formatCustomDate(value: unknown): string {
   if (!value) return "";
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) return formatDateOnly(value).replaceAll(" ", "-");
   const date = new Date(String(value));
   if (Number.isNaN(date.getTime())) return String(value);
-  return date.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }).replaceAll(" ", "-");
+  return formatDateShort(date).replaceAll(" ", "-");
 }
 const crossFilterRelations: Record<string, string[]> = {
   Lead: ["SiteVisit", "Opportunity", "Quotation", "Booking", "Task"],

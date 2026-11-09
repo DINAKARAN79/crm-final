@@ -8,7 +8,9 @@ import { bookingApi } from "@/lib/api";
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { CurrencyInput } from "@/components/ui/currency-input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { PdfDocumentPreview, type PdfPreviewDocument } from "@/components/crm/pdf-document-preview";
 import { useToast } from "@/hooks/use-toast";
@@ -16,7 +18,14 @@ import { useToast } from "@/hooks/use-toast";
 type JsonFields = Record<string, string | number | boolean | null | undefined>;
 
 export interface BookingRecord {
-  lead?: { id: string; leadNumber: string; firstName?: string | null; lastName: string; owner?: { id: string; firstName?: string | null; lastName?: string | null } | null };
+  lead?:  {
+    id: string;
+    leadNumber: string;
+    firstName?: string | null;
+    lastName: string;
+    owner?: { id: string; firstName?: string | null; lastName?: string | null } | null;
+    bookedBy?: { id: string; firstName?: string | null; lastName?: string | null } | null;
+  };
   id: string;
   bookingNumber: string;
   status: string;
@@ -81,6 +90,13 @@ const bookingStatusLabel = (status: string) => ({
 
 const personName = (person?: { firstName?: string | null; lastName?: string | null } | null) =>
   [person?.firstName, person?.lastName].filter(Boolean).join(" ") || "—";
+
+const bookingOwnerName = (booking: BookingRecord) =>
+  personName(booking.lead?.bookedBy) !== "—"
+    ? personName(booking.lead?.bookedBy)
+    : personName(booking.owner) !== "—"
+      ? personName(booking.owner)
+      : personName(booking.lead?.owner);
 
 function DetailField({ label, value }: { label: string; value: unknown }) {
   return (
@@ -364,7 +380,7 @@ function bookingDetailFallbacks(booking: BookingRecord): Record<string, unknown>
     project: booking.project.name,
     plotSqFt: booking.unit.area,
     unitStatus: booking.unit.status,
-    bookingOwner: personName(booking.owner) !== "—" ? personName(booking.owner) : personName(booking.lead?.owner),
+    bookingOwner: bookingOwnerName(booking),
     lead: leadName || booking.lead?.leadNumber,
     bookingAmount: booking.bookingAmount,
     clientName: applicantName,
@@ -425,7 +441,7 @@ function bookingDetailFallbacks(booking: BookingRecord): Record<string, unknown>
     createdBy: booking.createdBy ? personName(booking.createdBy) : null,
     createdAt: booking.createdAt,
     lastModifiedBy: null,
-    recordOwner: personName(booking.owner),
+    recordOwner: bookingOwnerName(booking),
     updatedAt: booking.updatedAt || booking.createdAt,
     Id: booking.id,
     Name: booking.bookingNumber,
@@ -434,7 +450,7 @@ function bookingDetailFallbacks(booking: BookingRecord): Record<string, unknown>
     LastModifiedDate: booking.updatedAt || booking.createdAt,
     LastReferencedDate: booking.createdAt,
     LastViewedDate: booking.createdAt,
-    OwnerId: booking.owner ? personName(booking.owner) : null,
+    OwnerId: bookingOwnerName(booking),
     Booking_Date__c: booking.createdAt.slice(0, 10),
     Booking_DateTime__c: booking.createdAt,
     Booking_Amount1__c: booking.bookingAmount,
@@ -471,7 +487,7 @@ function bookingDetailFallbacks(booking: BookingRecord): Record<string, unknown>
     Total_Price__c: booking.quotation.totalPrice,
     Balance_Amount__c: booking.quotation.totalPrice,
     Unit_Facing_Direction__c: booking.plotDetails.facingDirection,
-    Booking_Owner__c: personName(booking.owner),
+    Booking_Owner__c: bookingOwnerName(booking),
   };
 }
 
@@ -606,10 +622,16 @@ export function BookingDetailsBody({ booking, onSaved }: { booking: BookingRecor
                         className="w-full rounded border border-sky-200 bg-white px-2 py-1 text-xs font-normal"
                       />
                     ) : canEdit ? (
-                      <input
+                      field.fieldType === "currency" ? <CurrencyInput
                         aria-label={field.label}
-                        type={field.fieldType === "dateTime" ? "datetime-local" : field.fieldType === "date" ? "date" : field.fieldType === "number" || field.fieldType === "currency" ? "number" : field.fieldType === "email" ? "email" : "text"}
-                        step={field.fieldType === "number" || field.fieldType === "currency" ? "any" : undefined}
+                        step="any"
+                        value={typeof value === "string" || typeof value === "number" ? String(value) : ""}
+                        onChange={(event) => setEditValues((current) => ({ ...current, [field.name]: event.target.value }))}
+                        className="h-8 px-2 pl-7 text-xs font-normal"
+                      /> : <Input
+                        aria-label={field.label}
+                        type={field.fieldType === "dateTime" ? "datetime-local" : field.fieldType === "date" ? "date" : field.fieldType === "number" ? "number" : field.fieldType === "email" ? "email" : "text"}
+                        step={field.fieldType === "number" ? "any" : undefined}
                         value={typeof value === "string" || typeof value === "number" ? String(value) : ""}
                         onChange={(event) => setEditValues((current) => ({ ...current, [field.name]: event.target.value }))}
                         className="h-8 w-full rounded border border-sky-200 bg-white px-2 text-xs font-normal"
@@ -628,11 +650,6 @@ export function BookingDetailsBody({ booking, onSaved }: { booking: BookingRecor
       {additionalApplicants(booking.profession).map((applicant, index) => (
         <ApplicantDetails key={`${applicant.name || "applicant"}-${index}`} title={index === 0 ? "Third applicant" : "Fourth applicant"} applicant={applicant} />
       ))}
-      <section className="rounded-md border border-sky-100 bg-white p-4">
-        <h3 className="font-semibold text-slate-900">Payment plan</h3>
-        <p className="mt-1 text-sm text-indigo-700">{booking.quotation.paymentPlanName}</p>
-        {booking.quotation.terms && <p className="mt-4 whitespace-pre-wrap border-t pt-3 text-sm"><span className="font-semibold">Terms and notes:</span> {booking.quotation.terms}</p>}
-      </section>
     </div>
   );
 }

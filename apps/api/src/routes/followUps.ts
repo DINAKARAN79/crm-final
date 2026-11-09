@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { prisma } from '@dct-crm/db';
-import { crmDateRangeBounds, followUpSchema } from '@dct-crm/shared';
+import { crmDateRangeBounds, formatCRMDateTime, followUpSchema } from '@dct-crm/shared';
 import { futureFollowUpError, getNextFollowUpNumber, presentFollowUp, resolveFollowUpLinks } from '../services/followUpService';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { listOrderBy, listViewConstraint, mergeListWhere } from '../services/listViewService';
@@ -10,6 +10,7 @@ import { followUpAccessWhere } from '../services/followUpAccess';
 import { normalizeOverdueFollowUps, promoteNewLeadOnFirstActivity } from '../services/leadWorkflowExtras';
 import { tagLeadFollowUpEvents } from '../services/leadEventTagging';
 import { appendLeadProcessNote } from '../services/leadNotes';
+import { getTenantTimezone } from '../services/tenantTimezone';
 
 const router = Router();
 
@@ -47,6 +48,7 @@ router.get('/', authorize('FollowUp', 'read'), async (req: AuthRequest, res: Res
       const range = crmDateRangeBounds(
         startDate ? String(startDate) : undefined,
         endDate ? String(endDate) : undefined,
+        await getTenantTimezone(req.tenantId!),
       );
       if ('error' in range) {
         return res.status(400).json({ success: false, error: range.error });
@@ -275,11 +277,7 @@ router.post('/', authorize('FollowUp', 'create'), async (req: AuthRequest, res: 
           activityLabel: 'Follow-up',
         });
         await tagLeadFollowUpEvents(tx, req.tenantId!, links.leadId);
-        const dueDateLabel = new Intl.DateTimeFormat('en-IN', {
-          timeZone: 'Asia/Kolkata',
-          dateStyle: 'medium',
-          timeStyle: 'short',
-        }).format(new Date(data.dueDate));
+        const dueDateLabel = formatCRMDateTime(new Date(data.dueDate), await getTenantTimezone(req.tenantId!));
         await appendLeadProcessNote(tx, {
           tenantId: req.tenantId!,
           leadId: links.leadId,

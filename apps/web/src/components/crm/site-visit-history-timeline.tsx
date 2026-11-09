@@ -5,6 +5,7 @@ import { CheckCircle2, ChevronDown, History, Loader2, RefreshCw } from "lucide-r
 import { siteVisitApi } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { getTenantTimezone } from "@/lib/date-format";
 
 interface SiteVisitHistoryTimelineProps {
   siteVisitId: string;
@@ -37,6 +38,7 @@ function displayValue(value: unknown, field: string): string {
         year: "numeric",
         hour: "numeric",
         minute: "2-digit",
+        timeZone: getTenantTimezone(),
       }).format(parsedDate);
     }
   }
@@ -88,17 +90,17 @@ function historyDetails(entry: HistoryEntry): string {
 
 function monthLabel(date: string): string {
   if (Number.isNaN(new Date(date).getTime())) return "Date unavailable";
-  return new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" }).format(new Date(date));
+  return new Intl.DateTimeFormat("en-IN", { month: "long", year: "numeric", timeZone: getTenantTimezone() }).format(new Date(date));
 }
 
 function dayLabel(date: string): string {
   if (Number.isNaN(new Date(date).getTime())) return "—";
-  return new Intl.DateTimeFormat(undefined, { day: "2-digit", month: "short" }).format(new Date(date));
+  return new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", timeZone: getTenantTimezone() }).format(new Date(date));
 }
 
 function fullDateLabel(date: string): string {
   if (Number.isNaN(new Date(date).getTime())) return "Date unavailable";
-  return new Date(date).toLocaleString();
+  return new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short", timeZone: getTenantTimezone() }).format(new Date(date));
 }
 
 export function SiteVisitHistoryTimeline({

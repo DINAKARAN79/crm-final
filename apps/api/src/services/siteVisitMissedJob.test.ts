@@ -5,6 +5,7 @@ const database = vi.hoisted(() => ({
   siteVisitUpdateMany: vi.fn(),
   auditLogCreate: vi.fn(),
   tenantFindMany: vi.fn(),
+  tenantFindUnique: vi.fn(),
   transaction: vi.fn(),
 }));
 
@@ -15,7 +16,7 @@ const tagging = vi.hoisted(() => ({
 vi.mock('@dct-crm/db', () => ({
   prisma: {
     siteVisit: { findMany: database.siteVisitFindMany },
-    tenant: { findMany: database.tenantFindMany },
+    tenant: { findMany: database.tenantFindMany, findUnique: database.tenantFindUnique },
     $transaction: database.transaction,
   },
 }));
@@ -44,6 +45,7 @@ describe('site visit missed job', () => {
     database.siteVisitFindMany.mockResolvedValue([]);
     database.siteVisitUpdateMany.mockResolvedValue({ count: 1 });
     database.tenantFindMany.mockResolvedValue([{ id: 'tenant-1' }]);
+    database.tenantFindUnique.mockResolvedValue({ timezone: 'Asia/Kolkata' });
   });
 
   it('keeps a scheduled visit unchanged before 6 PM even when its appointment time has passed', async () => {
@@ -52,6 +54,17 @@ describe('site visit missed job', () => {
     expect(updated).toBe(0);
     expect(database.siteVisitFindMany).not.toHaveBeenCalled();
     expect(database.siteVisitUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it('uses the tenant-local day and cutoff for site visits', () => {
+    const instant = new Date('2026-07-02T01:00:00.000Z');
+    const range = crmDayRange(instant, 'America/Los_Angeles');
+    expect(range).toEqual({
+      dateKey: '2026-07-01',
+      start: new Date('2026-07-01T07:00:00.000Z'),
+      end: new Date('2026-07-02T07:00:00.000Z'),
+    });
+    expect(missedJobDecision(instant, null, 'America/Los_Angeles')).toEqual({ run: true, dateKey: '2026-07-01' });
   });
 
   it('marks incomplete visits scheduled for the current day as missed at 6 PM', async () => {

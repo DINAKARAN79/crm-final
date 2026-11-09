@@ -16,7 +16,7 @@ import {
 import { DataTable } from "@/components/crm/data-table";
 import { FieldDefinition } from "./field-renderer";
 import { MoreHorizontal, Eye, Edit, Trash2 } from "lucide-react";
-import { formatCRMDate, formatCRMDateTime } from "@dct-crm/shared";
+import { formatDate as formatTenantDate, formatDateTime as formatTenantDateTime } from "@/lib/date-format";
 
 interface DynamicTableProps {
   objectName: string;
@@ -68,7 +68,7 @@ function formatCellValue(value: any, field: FieldDefinition): React.ReactNode {
       try {
         return (
           <span>
-            {formatCRMDate(String(value))}
+            {formatTenantDate(String(value))}
           </span>
         );
       } catch {
@@ -79,7 +79,7 @@ function formatCellValue(value: any, field: FieldDefinition): React.ReactNode {
       try {
         return (
           <span>
-            {formatCRMDateTime(String(value))}
+            {formatTenantDateTime(String(value))}
           </span>
         );
       } catch {

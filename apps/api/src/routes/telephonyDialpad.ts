@@ -28,6 +28,7 @@ const dialpadEventSchema = z.object({
     'BIZCALL_DISPOSITION_SUBMITTED',
   ]),
   leadId: z.string().trim().min(1).max(255).optional(),
+  callDetailId: z.string().trim().min(1).max(255).optional(),
   callUuid: z.string().trim().min(1).max(255).optional(),
   number: z.string().trim().regex(/^\+[1-9]\d{1,14}$/).optional(),
   duration: z.number().int().min(0).max(86_400).optional(),
@@ -323,7 +324,16 @@ router.post('/dialpad-event', async (req: AuthRequest, res: Response) => {
     const now = new Date();
     const fiveMinutesAgo = new Date(now.getTime() - 5 * 60 * 1000);
     const call = await prisma.$transaction(async (tx) => {
-      let existing = event.callUuid
+      let existing = event.callDetailId
+        ? await tx.callDetail.findFirst({
+          where: {
+            id: event.callDetailId,
+            tenantId: req.tenantId!,
+            createdById: req.user!.id,
+            ...(lead ? { leadId: lead.id } : {}),
+          },
+        })
+        : event.callUuid
         ? await tx.callDetail.findFirst({
           where: {
             tenantId: req.tenantId!,
@@ -414,7 +424,9 @@ router.post('/dialpad-event', async (req: AuthRequest, res: Response) => {
         const auditFields: Prisma.InputJsonObject = {
           number: maskPhone(String(updated.callTo || event.number || '')),
           ...(event.event === 'BIZCALL_CALL_ENDED' ? { duration: event.duration ?? updated.duration } : {}),
-          ...(event.event === 'BIZCALL_DISPOSITION_SUBMITTED' ? { disposition: event.disposition || '' } : {}),
+          ...(event.event === 'BIZCALL_DISPOSITION_SUBMITTED'
+            ? { disposition: updated.disposition || '', notes: updated.notes || '' }
+            : {}),
         };
         await tx.auditLog.create({
           data: {
@@ -460,7 +472,18 @@ router.post('/dialpad-event', async (req: AuthRequest, res: Response) => {
     if (!call) {
       return res.status(404).json({ success: false, ok: false, code: 'CALL_NOT_FOUND', message: 'No matching dialpad call was found.' });
     }
-    return res.json({ success: true, ok: true, data: { callDetailId: call.id, event: event.event, leadId: call.leadId } });
+    return res.json({
+      success: true,
+      ok: true,
+      data: {
+        callDetailId: call.id,
+        event: event.event,
+        leadId: call.leadId,
+        ...(event.event === 'BIZCALL_DISPOSITION_SUBMITTED'
+          ? { disposition: call.disposition, notes: call.notes }
+          : {}),
+      },
+    });
   } catch (error) {
     console.error('Dialpad event error', error instanceof Error ? error.name : 'error');
     return res.status(500).json({ success: false, ok: false, code: 'DIALPAD_EVENT_FAILED', message: 'The call event could not be recorded.' });

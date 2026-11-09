@@ -12,6 +12,8 @@ const routeMocks = vi.hoisted(() => ({
   followUp: null as Record<string, unknown> | null,
   duplicate: null as Record<string, unknown> | null,
   createCall: vi.fn(),
+  findExistingCall: vi.fn(),
+  updateCall: vi.fn(),
   createAudit: vi.fn(),
   hasPermission: vi.fn(),
   canAccessLead: vi.fn(),
@@ -42,7 +44,11 @@ vi.mock('@dct-crm/db', () => ({
     },
     auditLog: { create: routeMocks.createAudit },
     $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback({
-      callDetail: { create: routeMocks.createCall },
+      callDetail: {
+        create: routeMocks.createCall,
+        findFirst: routeMocks.findExistingCall,
+        update: routeMocks.updateCall,
+      },
       auditLog: { create: routeMocks.createAudit },
     })),
   },
@@ -123,6 +129,8 @@ beforeEach(() => {
   routeMocks.canAccessLead.mockReset().mockResolvedValue(true);
   routeMocks.normalizeLeadPhone.mockReset().mockImplementation((number: string) => number ? { e164: number } : null);
   routeMocks.createCall.mockReset().mockResolvedValue({ id: 'call-detail-1' });
+  routeMocks.findExistingCall.mockReset().mockResolvedValue(null);
+  routeMocks.updateCall.mockReset().mockImplementation(async ({ data }: { data: Record<string, unknown> }) => data);
   routeMocks.createAudit.mockReset().mockResolvedValue({});
   routeMocks.applyStatus.mockReset().mockResolvedValue({ changed: true, status: 'INCOMING' });
   routeMocks.appendNote.mockReset().mockResolvedValue(undefined);
@@ -143,6 +151,82 @@ describe('POST /api/telephony/dialpad-call-started', () => {
       phoneField: 'phone',
       tenantId: 'attacker-tenant',
       userId: 'attacker-user',
+    });
+
+    describe('POST /api/telephony/dialpad-event disposition persistence', () => {
+      it('persists call notes and disposition idempotently against the authenticated lead and call', async () => {
+        const lead = routeMocks.lead as { id: string };
+        let savedCall: Record<string, unknown> = {
+          id: 'call-detail-1',
+          tenantId: 'session-tenant',
+          createdById: routeMocks.userId,
+          leadId: lead.id,
+          callTo: '+14155552671',
+          status: 'Ended',
+          source: 'dialpad',
+          providerCallId: 'provider-call-1',
+          disposition: null,
+          notes: null,
+        };
+        routeMocks.findExistingCall.mockImplementation(async () => savedCall);
+        routeMocks.updateCall.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => {
+          savedCall = { ...savedCall, ...data };
+          return savedCall;
+        });
+
+        const event = {
+          event: 'BIZCALL_DISPOSITION_SUBMITTED',
+          leadId: lead.id,
+          callDetailId: 'call-detail-1',
+          callUuid: 'provider-call-1',
+          disposition: 'Interested',
+          notes: 'Call me tomorrow',
+        };
+        const first = await post('dialpad-event', event);
+        const firstBody = await first.json() as { data: Record<string, unknown> };
+        const second = await post('dialpad-event', event);
+
+        expect(first.status).toBe(200);
+        expect(firstBody.data).toMatchObject({
+          callDetailId: 'call-detail-1',
+          leadId: lead.id,
+          disposition: 'Interested',
+          notes: 'Call me tomorrow',
+        });
+        expect(second.status).toBe(200);
+        expect(savedCall).toMatchObject({ disposition: 'Interested', notes: 'Call me tomorrow' });
+        expect(routeMocks.findExistingCall).toHaveBeenCalledWith({
+          where: {
+            id: 'call-detail-1',
+            tenantId: 'session-tenant',
+            createdById: routeMocks.userId,
+            leadId: lead.id,
+          },
+        });
+        expect(routeMocks.appendNote).toHaveBeenCalledOnce();
+        expect(routeMocks.appendNote).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+          tenantId: 'session-tenant',
+          leadId: lead.id,
+          userId: routeMocks.userId,
+          content: 'Call disposition saved: Interested\nNotes: Call me tomorrow',
+        }));
+        expect(routeMocks.createAudit).toHaveBeenCalledOnce();
+      });
+
+      it('does not attach a disposition to a different lead call', async () => {
+        routeMocks.lead = null;
+        routeMocks.findExistingCall.mockResolvedValue(null);
+        const response = await post('dialpad-event', {
+          event: 'BIZCALL_DISPOSITION_SUBMITTED',
+          leadId: 'other-lead',
+          callDetailId: 'call-detail-1',
+          disposition: 'Interested',
+          notes: 'Not this lead',
+        });
+        expect(response.status).toBe(404);
+        expect(await response.json()).toMatchObject({ code: 'LEAD_NOT_FOUND' });
+        expect(routeMocks.appendNote).not.toHaveBeenCalled();
+      });
     });
     const body = await response.json() as { data: Record<string, string> };
     const data = body.data as Record<string, string>;

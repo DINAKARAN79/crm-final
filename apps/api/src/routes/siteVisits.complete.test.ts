@@ -10,6 +10,7 @@ const database = vi.hoisted(() => ({
   auditFindMany: vi.fn(),
   auditCreate: vi.fn(),
   userFindFirst: vi.fn(),
+  tenantFindUnique: vi.fn(),
   transaction: vi.fn(),
 }));
 
@@ -20,6 +21,7 @@ const authState = vi.hoisted(() => ({
 
 vi.mock('@dct-crm/db', () => ({
   prisma: {
+    tenant: { findUnique: database.tenantFindUnique },
     $transaction: database.transaction,
     siteVisit: {
       findFirst: database.siteVisitFindFirst,
@@ -138,6 +140,7 @@ beforeEach(() => {
     lastName: 'Admin',
     profile: { name: 'System Admin' },
   });
+  database.tenantFindUnique.mockResolvedValue({ timezone: null });
   database.siteVisitFindFirst.mockResolvedValue({
     id: 'visit-a',
     tenantId: 'tenant-a',

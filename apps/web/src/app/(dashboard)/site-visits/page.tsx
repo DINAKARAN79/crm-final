@@ -19,7 +19,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useToast } from "@/hooks/use-toast";
 import { leadApi, projectApi, siteVisitApi } from "@/lib/api";
-import { formatDateTime } from "@/lib/date-format";
+import { dateKey, dateTimeInputValue, formatDateTime, getTenantTimezone } from "@/lib/date-format";
+import { crmLocalDateTimeToDate } from "@dct-crm/shared";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
@@ -42,12 +43,8 @@ interface SiteVisit {
   cancellationReason?: string;
 }
 
-// Business timezone: Asia/Kolkata (UTC+05:30)
 const istDayKey = (value: string | Date): string => {
-  const d = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(d.getTime())) return "";
-  const ist = new Date(d.getTime() + (5 * 60 + 30) * 60 * 1000);
-  return ist.toISOString().slice(0, 10);
+  return dateKey(value);
 };
 
 const timingBadge = (
@@ -313,10 +310,9 @@ export default function SiteVisitsPage() {
       setSelectedProjectId(projectResults[0]?.id || "");
       if (!availableLeads.length) setScheduleError("Create or assign a lead before scheduling a site visit.");
       else if (!projectResults.length) setScheduleError("Add an active project before scheduling a site visit.");
-      const now = new Date();
-      const localDate = new Date(now.getTime() - now.getTimezoneOffset() * 60_000);
-      setScheduledDate(localDate.toISOString().slice(0, 10));
-      setScheduledTime(localDate.toISOString().slice(11, 16));
+      const localDateTime = dateTimeInputValue();
+      setScheduledDate(localDateTime.slice(0, 10));
+      setScheduledTime(localDateTime.slice(11, 16));
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to load leads and projects.";
       setScheduleError(message);
@@ -336,7 +332,7 @@ export default function SiteVisitsPage() {
       await siteVisitApi.create({
         leadId: selectedLeadId,
         projectId: selectedProjectId,
-        scheduledAt: new Date(`${scheduledDate}T${scheduledTime}`).toISOString(),
+        scheduledAt: crmLocalDateTimeToDate(scheduledDate, scheduledTime, getTenantTimezone()).toISOString(),
         notes: scheduleNotes.trim(),
       });
       setScheduleOpen(false);

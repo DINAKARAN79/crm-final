@@ -81,6 +81,7 @@ model Tenant {
   quotations               Quotation[]
   bookings                 Booking[]
   receipts                 Receipt[]
+  refundRequests           RefundRequest[]
   projects                 Project[]
   projectLayouts           ProjectLayout[]
   units                    Unit[]
@@ -108,6 +109,9 @@ model Tenant {
   greRegistrationSessions  GreSession[]
   roundRobinConfigs        RoundRobinConfig[]
   roundRobinMembers        RoundRobinMember[]
+  leadImportJobs           LeadImportJob[]
+  leadImportStatusProfiles LeadImportStatusProfile[]
+  bookedBucketSetting      BookedBucketSetting?
 
   @@index([slug])
   @@index([companyCode])
@@ -148,6 +152,10 @@ model User {
   assignedLeads            Lead[]                     @relation("LeadOwner")
   ownedEnquiries           Enquiry[]                  @relation("EnquiryOwner")
   createdLeads             Lead[]                     @relation("LeadCreator")
+  bookedLeads              Lead[]                     @relation("LeadBookedBy")
+  leadImportJobs           LeadImportJob[]            @relation("LeadImportJobCreator")
+  bookedBucketFallbacks    BookedBucketSetting[]      @relation("BookedBucketFallback")
+  bookedBucketMemberships  BookedBucketMember[]
   assignedSiteVisits       SiteVisit[]                @relation("SvAssignee")
   createdSiteVisits        SiteVisit[]                @relation("SvCreator")
   completedSiteVisits      SiteVisit[]                @relation("SvCompletedBy")
@@ -158,6 +166,8 @@ model User {
   completedWelcomeCalls    Booking[]                  @relation("BookingWelcomeCallCompleter")
   createdReceipts          Receipt[]                  @relation("ReceiptCreator")
   reviewedReceipts         Receipt[]                  @relation("ReceiptReviewer")
+  createdRefundRequests    RefundRequest[]            @relation("RefundRequestCreator")
+  reviewedRefundRequests   RefundRequest[]            @relation("RefundRequestReviewer")
   followUps                FollowUp[]
   assignedFollowUps        FollowUp[]                 @relation("FollowUpAssignee")
   activities               Activity[]
@@ -607,13 +617,13 @@ model RecordTeamMember {
 // ============================================
 
 enum LeadStatus {
-  NEW                 @map("1")
-  INCOMING            @map("2")
-  PROSPECT            @map("3")
+  NEW                  @map("1")
+  INCOMING             @map("2")
+  PROSPECT             @map("3")
   SITE_VISIT_SCHEDULED @map("4")
-  SITE_VISIT_HAPPENED @map("5")
-  BOOKED              @map("6")
-  LOST                @map("7")
+  SITE_VISIT_HAPPENED  @map("5")
+  BOOKED               @map("6")
+  LOST                 @map("7")
 }
 
 model LeadStatusSetting {
@@ -684,6 +694,8 @@ model Lead {
   tenant            Tenant           @relation(fields: [tenantId], references: [id])
   ownerId           String?
   owner             User?            @relation("LeadOwner", fields: [ownerId], references: [id])
+  bookedById        String?
+  bookedBy          User?            @relation("LeadBookedBy", fields: [bookedById], references: [id], onDelete: SetNull)
   creatorId         String
   creator           User             @relation("LeadCreator", fields: [creatorId], references: [id])
   leadNumber        String?
@@ -705,21 +717,23 @@ model Lead {
   project           Project?         @relation(fields: [projectId], references: [id])
   cpPortalAccountId String?
   cpPortalAccount   CPPortalAccount? @relation(fields: [cpPortalAccountId], references: [id])
+  importJobId       String?
+  importJob         LeadImportJob?   @relation(fields: [importJobId], references: [id], onDelete: SetNull)
 
   // Standard Lead Fields - Contact Information
-  salutation     Salutation?
-  firstName      String?
-  lastName       String
-  title          String?
-  email          String?
+  salutation      Salutation?
+  firstName       String?
+  lastName        String
+  title           String?
+  email           String?
   normalizedEmail String?
-  phone          String?
+  phone           String?
   normalizedPhone String?
-  countryCode    String?
-  mobile         String?
-  tertiaryPhone  String?
-  alternateEmail String?
-  website        String?
+  countryCode     String?
+  mobile          String?
+  tertiaryPhone   String?
+  alternateEmail  String?
+  website         String?
 
   // Standard Lead Fields - Company Information
   company           String
@@ -786,6 +800,7 @@ model Lead {
   quotations              Quotation[]
   bookings                Booking[]
   receipts                Receipt[]
+  refundRequests          RefundRequest[]
   enquiries               Enquiry[]
   followUps               FollowUp[]
   activities              Activity[]
@@ -802,11 +817,12 @@ model Lead {
   opportunityUnits        Unit[]             @relation("UnitOpportunity")
 
   @@unique([tenantId, leadNumber])
+  @@unique([tenantId, normalizedEmail])
+  @@unique([tenantId, normalizedPhone])
   @@index([tenantId])
   @@index([tenantId, status])
   @@index([tenantId, ownerId])
-  @@unique([tenantId, normalizedEmail])
-  @@unique([tenantId, normalizedPhone])
+  @@index([tenantId, bookedById])
   @@index([tenantId, email])
   @@index([tenantId, phone])
   @@index([tenantId, company])
@@ -817,6 +833,75 @@ model Lead {
   @@index([tenantId, source])
   @@index([tenantId, createdAt])
   @@index([tenantId, cpPortalAccountId])
+  @@index([importJobId])
+}
+
+model LeadImportJob {
+  id           String    @id @default(cuid())
+  tenantId     String
+  tenant       Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdById  String
+  createdBy    User      @relation("LeadImportJobCreator", fields: [createdById], references: [id])
+  status       String    @default("RUNNING")
+  totalRows    Int
+  createdCount Int       @default(0)
+  linkedCount  Int       @default(0)
+  failedCount  Int       @default(0)
+  startedAt    DateTime  @default(now())
+  completedAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  leads        Lead[]
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, status])
+}
+
+model LeadImportStatusProfile {
+  id           String   @id @default(cuid())
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  status       String
+  profileNames Json
+  updatedById  String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([tenantId, status])
+  @@index([tenantId])
+}
+
+model BookedBucketSetting {
+  id            String              @id @default(cuid())
+  tenantId      String              @unique
+  tenant        Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  isActive      Boolean             @default(false)
+  fallbackUserId String?
+  moveOpenFollowUps Boolean          @default(false)
+  returnToPreviousOwnerOnCancel Boolean @default(false)
+  fallbackUser  User?               @relation("BookedBucketFallback", fields: [fallbackUserId], references: [id], onDelete: SetNull)
+  members       BookedBucketMember[]
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  @@map("booked_bucket_settings")
+}
+
+model BookedBucketMember {
+  id        String               @id @default(cuid())
+  tenantId  String
+  setting   BookedBucketSetting  @relation(fields: [tenantId], references: [tenantId], onDelete: Cascade)
+  userId    String
+  user      User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sortOrder Int
+  isActive  Boolean              @default(true)
+  pointer   Int                  @default(0)
+  createdAt DateTime             @default(now())
+  updatedAt DateTime             @updatedAt
+
+  @@unique([tenantId, userId])
+  @@index([tenantId, isActive, sortOrder])
+  @@map("booked_bucket_members")
 }
 
 model Company {
@@ -894,7 +979,7 @@ model Enquiry {
   createdAt            DateTime @default(now())
   updatedAt            DateTime @updatedAt
 
-  followUps            FollowUp[]
+  followUps FollowUp[]
 
   @@unique([tenantId, enquiryNumber])
   @@unique([tenantId, originalSubmissionId])
@@ -1180,25 +1265,31 @@ enum ReceiptApprovalStatus {
   ISSUED
 }
 
+enum RefundRequestStatus {
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+}
+
 model Booking {
-  id                        String        @id @default(cuid())
+  id                        String          @id @default(cuid())
   tenantId                  String
-  tenant                    Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant                    Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   leadId                    String
-  lead                      Lead          @relation(fields: [leadId], references: [id], onDelete: Restrict)
-  quotationId               String        @unique
-  quotation                 Quotation     @relation(fields: [quotationId], references: [id], onDelete: Restrict)
+  lead                      Lead            @relation(fields: [leadId], references: [id], onDelete: Restrict)
+  quotationId               String          @unique
+  quotation                 Quotation       @relation(fields: [quotationId], references: [id], onDelete: Restrict)
   projectId                 String
-  project                   Project       @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  project                   Project         @relation(fields: [projectId], references: [id], onDelete: Restrict)
   unitId                    String
-  unit                      Unit          @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  unit                      Unit            @relation(fields: [unitId], references: [id], onDelete: Restrict)
   createdById               String
-  createdBy                 User          @relation("BookingCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  createdBy                 User            @relation("BookingCreator", fields: [createdById], references: [id], onDelete: Restrict)
   ownerId                   String?
-  owner                     User?         @relation("BookingOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  owner                     User?           @relation("BookingOwner", fields: [ownerId], references: [id], onDelete: SetNull)
   bookingNumber             String
-  status                    BookingStatus @default(RESERVED)
-  bookingStage              BookingStage  @default(NEW_BOOKING)
+  status                    BookingStatus   @default(RESERVED)
+  bookingStage              BookingStage    @default(NEW_BOOKING)
   cancellationStatus        String?
   cancellationReason        String?
   cancellationRequestedById String?
@@ -1208,20 +1299,21 @@ model Booking {
   cancellationReviewNote    String?
   welcomeCallCompletedAt    DateTime?
   welcomeCallCompletedById  String?
-  welcomeCallCompletedBy    User?         @relation("BookingWelcomeCallCompleter", fields: [welcomeCallCompletedById], references: [id], onDelete: SetNull)
+  welcomeCallCompletedBy    User?           @relation("BookingWelcomeCallCompleter", fields: [welcomeCallCompletedById], references: [id], onDelete: SetNull)
   welcomeCallNotes          String?
-  details                   Json          @default("{}")
+  details                   Json            @default("{}")
   plotDetails               Json
-  bookingAmount             Float         @default(0)
+  bookingAmount             Float           @default(0)
   firstApplicant            Json
   secondApplicant           Json?
   profession                Json
   referredBy                String?
   receipts                  Receipt[]
+  refundRequests            RefundRequest[]
   followUps                 FollowUp[]
   activities                Activity[]
-  createdAt                 DateTime      @default(now())
-  updatedAt                 DateTime      @updatedAt
+  createdAt                 DateTime        @default(now())
+  updatedAt                 DateTime        @updatedAt
 
   @@unique([tenantId, bookingNumber])
   @@index([tenantId, createdAt])
@@ -1259,10 +1351,43 @@ model Receipt {
   updatedAt           DateTime              @updatedAt
 
   @@unique([tenantId, receiptNumber])
+  @@unique([tenantId, transactionId])
   @@index([tenantId, createdAt])
   @@index([tenantId, leadId, createdAt])
   @@index([tenantId, bookingId, receivedDate])
   @@index([tenantId, approvalStatus, approvalSubmittedAt])
+}
+
+model RefundRequest {
+  id              String              @id @default(cuid())
+  tenantId        String
+  tenant          Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  leadId          String
+  lead            Lead                @relation(fields: [leadId], references: [id], onDelete: Restrict)
+  bookingId       String
+  booking         Booking             @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  createdById     String
+  createdBy       User                @relation("RefundRequestCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  reviewedById    String?
+  reviewedBy      User?               @relation("RefundRequestReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  requestKey      String
+  customerName    String
+  customerPhone   String?
+  customerEmail   String?
+  amount          Float
+  reason          String
+  refundReference String
+  status          RefundRequestStatus @default(PENDING_APPROVAL)
+  submittedAt     DateTime            @default(now())
+  reviewedAt      DateTime?
+  reviewNote      String?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  @@unique([tenantId, requestKey])
+  @@index([tenantId, status, submittedAt])
+  @@index([tenantId, bookingId, createdAt])
+  @@index([tenantId, leadId, createdAt])
 }
 
 model SiteVisit {
@@ -1486,39 +1611,39 @@ model ProjectLayoutShape {
 // ============================================
 
 model FollowUp {
-  id             String  @id @default(cuid())
+  id             String   @id @default(cuid())
   followUpNumber String
   tenantId       String
-  tenant         Tenant  @relation(fields: [tenantId], references: [id])
+  tenant         Tenant   @relation(fields: [tenantId], references: [id])
   leadId         String?
-  lead           Lead?     @relation(fields: [leadId], references: [id])
+  lead           Lead?    @relation(fields: [leadId], references: [id])
   enquiryId      String?
-  enquiry        Enquiry?  @relation(fields: [enquiryId], references: [id], onDelete: SetNull)
+  enquiry        Enquiry? @relation(fields: [enquiryId], references: [id], onDelete: SetNull)
   bookingId      String?
-  booking        Booking?  @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  booking        Booking? @relation(fields: [bookingId], references: [id], onDelete: SetNull)
   ownerId        String
-  owner          User      @relation(fields: [ownerId], references: [id])
+  owner          User     @relation(fields: [ownerId], references: [id])
   assignedToId   String?
-  assignedTo     User?     @relation("FollowUpAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+  assignedTo     User?    @relation("FollowUpAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
 
-  title                String
-  subject              String?
-  description          String?
-  comments             String?
-  previousDisposition  String?
-  cancelledReason      String?
-  dueDate              DateTime
-  completedAt          DateTime?
-  isCompleted          Boolean  @default(false)
-  isMissed             Boolean  @default(false)
-  missedAt             DateTime?
-  status               String   @default("SCHEDULED")
-  awaitedFollowUp      Boolean  @default(false)
-  isSystemCancelled    Boolean  @default(false)
-  testCheckbox         Boolean  @default(false)
-  sourceTaskId         String?
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
+  title               String
+  subject             String?
+  description         String?
+  comments            String?
+  previousDisposition String?
+  cancelledReason     String?
+  dueDate             DateTime
+  completedAt         DateTime?
+  isCompleted         Boolean   @default(false)
+  isMissed            Boolean   @default(false)
+  missedAt            DateTime?
+  status              String    @default("SCHEDULED")
+  awaitedFollowUp     Boolean   @default(false)
+  isSystemCancelled   Boolean   @default(false)
+  testCheckbox        Boolean   @default(false)
+  sourceTaskId        String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 
   @@unique([tenantId, followUpNumber])
   @@unique([tenantId, sourceTaskId])
@@ -1604,41 +1729,41 @@ model Activity {
 }
 
 model CallDetail {
-  id                 String   @id @default(cuid())
-  name               String   @db.VarChar(255)
+  id                 String    @id @default(cuid())
+  name               String    @db.VarChar(255)
   tenantId           String
-  tenant             Tenant   @relation(fields: [tenantId], references: [id])
-  callFrom           String?  @db.VarChar(255)
-  callId             String   @unique @default(cuid()) @db.VarChar(255)
-  callTo             String?  @db.VarChar(50)
-  callType           String   @db.VarChar(50)
+  tenant             Tenant    @relation(fields: [tenantId], references: [id])
+  callFrom           String?   @db.VarChar(255)
+  callId             String    @unique @default(cuid()) @db.VarChar(255)
+  callTo             String?   @db.VarChar(50)
+  callType           String    @db.VarChar(50)
   caseId             String?
-  case               Lead?    @relation("CallDetailCase", fields: [caseId], references: [id], onDelete: SetNull)
+  case               Lead?     @relation("CallDetailCase", fields: [caseId], references: [id], onDelete: SetNull)
   createdById        String
-  createdBy          User     @relation("CallDetailCreator", fields: [createdById], references: [id])
-  duration           Int      @default(0)
+  createdBy          User      @relation("CallDetailCreator", fields: [createdById], references: [id])
+  duration           Int       @default(0)
   endAt              DateTime
-  executiveContactNo String?  @db.VarChar(50)
-  landingNumber      String?  @db.VarChar(255)
+  executiveContactNo String?   @db.VarChar(50)
+  landingNumber      String?   @db.VarChar(255)
   lastModifiedById   String?
-  lastModifiedBy     User?    @relation("CallDetailModifier", fields: [lastModifiedById], references: [id], onDelete: SetNull)
+  lastModifiedBy     User?     @relation("CallDetailModifier", fields: [lastModifiedById], references: [id], onDelete: SetNull)
   leadId             String?
-  lead               Lead?    @relation(fields: [leadId], references: [id])
+  lead               Lead?     @relation(fields: [leadId], references: [id])
   ownerId            String?
-  owner              User?    @relation("CallDetailOwner", fields: [ownerId], references: [id], onDelete: SetNull)
-  parentId           String?  @db.VarChar(100)
-  parentUrl          String?  @db.VarChar(255)
-  recordingFile      String?  @db.VarChar(255)
+  owner              User?     @relation("CallDetailOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  parentId           String?   @db.VarChar(100)
+  parentUrl          String?   @db.VarChar(255)
+  recordingFile      String?   @db.VarChar(255)
   startAt            DateTime
   answeredAt         DateTime?
-  status             String   @default("COMPLETED") @db.VarChar(50)
+  status             String    @default("COMPLETED") @db.VarChar(50)
   notes              String?
-  disposition        String?  @db.VarChar(120)
-  source             String?  @db.VarChar(40)
-  providerCallId     String?  @db.VarChar(255)
+  disposition        String?   @db.VarChar(120)
+  source             String?   @db.VarChar(40)
+  providerCallId     String?   @db.VarChar(255)
   providerResponse   Json?
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 
   @@unique([tenantId, name])
   @@index([tenantId, leadId, startAt])
@@ -1973,17 +2098,17 @@ model AuditLog {
   leadId   String?
   lead     Lead?   @relation(fields: [leadId], references: [id])
 
-  action     String
-  objectType String
-  objectId   String?
-  oldValues  Json?
-  newValues  Json?
-  ipAddress  String?
-  userAgent  String?
+  action           String
+  objectType       String
+  objectId         String?
+  oldValues        Json?
+  newValues        Json?
+  ipAddress        String?
+  userAgent        String?
   // Set when a Superadmin made this change while signed in as the tenant admin.
   // Stored without a User relation so the User model stays unchanged.
   impersonatedById String?
-  createdAt  DateTime @default(now())
+  createdAt        DateTime @default(now())
 
   @@index([tenantId])
   @@index([tenantId, userId])
@@ -2385,6 +2510,7 @@ model LeadOwnerHistory {
   previousStatus  String?
   newStatus       String?
   handoffReason   String?
+  source          String?
   changedById     String
   changedBy       User      @relation(fields: [changedById], references: [id])
   startDate       DateTime  @default(now())
@@ -2448,23 +2574,23 @@ model ListViewPin {
 }
 
 model ListViewRecent {
-  id        String   @id @default(cuid())
-  tenantId  String
-  userId    String
-  module    String
-  viewKey   String
-  usedAt    DateTime @updatedAt
+  id       String   @id @default(cuid())
+  tenantId String
+  userId   String
+  module   String
+  viewKey  String
+  usedAt   DateTime @updatedAt
 
   @@unique([tenantId, userId, module, viewKey])
 }
 
 model CrmRecordView {
-  id        String   @id @default(cuid())
-  tenantId  String
-  userId    String
-  module    String
-  recordId  String
-  viewedAt  DateTime @updatedAt
+  id       String   @id @default(cuid())
+  tenantId String
+  userId   String
+  module   String
+  recordId String
+  viewedAt DateTime @updatedAt
 
   @@unique([tenantId, userId, module, recordId])
   @@index([tenantId, userId, module, viewedAt])
@@ -2473,30 +2599,30 @@ model CrmRecordView {
 // Company API credentials. tenantId and createdById are stored without
 // Prisma relations so Tenant and User stay unchanged.
 model ApiKey {
-  id                 String    @id @default(cuid())
-  tenantId           String
-  name               String
-  keyPrefix          String
-  publicId           String?   @unique
-  keyHash            String    @unique
-  encryptedKey       String?
-  keyIv              String?
-  keyTag             String?
-  encryptionKeyVersion Int     @default(1)
-  needsRegenerate    Boolean   @default(false)
+  id                       String    @id @default(cuid())
+  tenantId                 String
+  name                     String
+  keyPrefix                String
+  publicId                 String?   @unique
+  keyHash                  String    @unique
+  encryptedKey             String?
+  keyIv                    String?
+  keyTag                   String?
+  encryptionKeyVersion     Int       @default(1)
+  needsRegenerate          Boolean   @default(false)
   revealedToCompanyAdminAt DateTime?
-  scopes             String[]
-  customHeaderName   String?
-  acceptOnlyCustomHeader Boolean @default(false)
-  status             String    @default("active")
-  rateLimitPerMinute Int       @default(120)
-  ipAllowlist        String[]  @default([])
-  lastUsedAt         DateTime?
-  expiresAt          DateTime?
-  graceUntil         DateTime?
-  revokedAt          DateTime?
-  createdById        String
-  createdAt          DateTime  @default(now())
+  scopes                   String[]
+  customHeaderName         String?
+  acceptOnlyCustomHeader   Boolean   @default(false)
+  status                   String    @default("active")
+  rateLimitPerMinute       Int       @default(120)
+  ipAllowlist              String[]  @default([])
+  lastUsedAt               DateTime?
+  expiresAt                DateTime?
+  graceUntil               DateTime?
+  revokedAt                DateTime?
+  createdById              String
+  createdAt                DateTime  @default(now())
 
   @@index([tenantId])
   @@index([tenantId, revokedAt])
@@ -2522,21 +2648,21 @@ model ApiKeyRequestLog {
 // Superadmin "Setup Home" sessions. Foreign keys are omitted so Tenant and User stay unchanged.
 // One row per browser login. The raw token is never stored.
 model UserSession {
-  id               String    @id @default(cuid())
-  tenantId         String
-  userId           String
-  sessionTokenHash String    @unique
-  refreshTokenHash String?   @unique
+  id                    String    @id @default(cuid())
+  tenantId              String
+  userId                String
+  sessionTokenHash      String    @unique
+  refreshTokenHash      String?   @unique
   refreshTokenExpiresAt DateTime?
-  browser          String?
-  os               String?
-  deviceType       String?
-  ipAddress        String?
-  createdAt        DateTime  @default(now())
-  lastSeenAt       DateTime  @default(now())
-  endedAt          DateTime?
-  endReason        String?
-  isImpersonation  Boolean   @default(false)
+  browser               String?
+  os                    String?
+  deviceType            String?
+  ipAddress             String?
+  createdAt             DateTime  @default(now())
+  lastSeenAt            DateTime  @default(now())
+  endedAt               DateTime?
+  endReason             String?
+  isImpersonation       Boolean   @default(false)
 
   @@index([tenantId, userId, endedAt])
   @@index([tenantId, lastSeenAt])
@@ -2544,11 +2670,11 @@ model UserSession {
 }
 
 model PresenceSetting {
-  tenantId                  String   @id
-  idleTimeoutSeconds        Int      @default(120)
-  heartbeatIntervalSeconds  Int      @default(30)
-  updatedAt                 DateTime @updatedAt
-  updatedById               String?
+  tenantId                 String   @id
+  idleTimeoutSeconds       Int      @default(120)
+  heartbeatIntervalSeconds Int      @default(30)
+  updatedAt                DateTime @updatedAt
+  updatedById              String?
 
   @@map("presence_settings")
 }
@@ -2578,8 +2704,8 @@ model ImpersonationSession {
 }
 
 model TenantImpersonationSetting {
-  tenantId        String  @id
-  notifyOnAccess  Boolean @default(true)
+  tenantId       String  @id
+  notifyOnAccess Boolean @default(true)
 
   @@map("tenant_impersonation_settings")
 }
@@ -2620,37 +2746,37 @@ model TelephonyCallReceipt {
 
 // Dialpad settings. tenantId is stored without a Tenant relation.
 model TelephonySetting {
-  id                     String   @id @default(cuid())
-  tenantId               String   @unique
+  id                    String   @id @default(cuid())
+  tenantId              String   @unique
   // Legacy REST click-to-call fields. Retained for existing databases; never used or exposed.
-  clickToCallUrl         String   @default("https://bizcall.cxteletech.com/api/integration/click2call")
-  authHeaderName         String   @default("X-API-KEY")
-  useBearerPrefix        Boolean  @default(false)
-  noAuthRequired         Boolean  @default(false)
-  allowTestUrl           Boolean  @default(false)
-  callIdFieldPath        String   @default("originateUuid")
-  callerId               String?
-  encryptedCredentials   String?
-  keyLast4               String?
-  encryptedExtraHeaders  String?
-  isActive               Boolean  @default(false)
-  updatedById            String?
-  dialpadUrl             String   @default("https://bizcall.cxteletech.com/embed/dialpad")
-  dialpadMode            String   @default("DOCKED")
+  clickToCallUrl        String   @default("https://bizcall.cxteletech.com/api/integration/click2call")
+  authHeaderName        String   @default("X-API-KEY")
+  useBearerPrefix       Boolean  @default(false)
+  noAuthRequired        Boolean  @default(false)
+  allowTestUrl          Boolean  @default(false)
+  callIdFieldPath       String   @default("originateUuid")
+  callerId              String?
+  encryptedCredentials  String?
+  keyLast4              String?
+  encryptedExtraHeaders String?
+  isActive              Boolean  @default(false)
+  updatedById           String?
+  dialpadUrl            String   @default("https://bizcall.cxteletech.com/embed/dialpad")
+  dialpadMode           String   @default("DOCKED")
   // Legacy selector for REST/message modes; the CRM now uses validated dialpad URLs only.
-  callMethod             String   @default("SERVER_API")
-  defaultDockState       String   @default("COLLAPSED")
-  theme                  String   @default("CRM")
-  productionOrigin       String?
-  duplicateGuardSeconds  Int      @default(10)
-  callsPerMinute         Int      @default(10)
-  maskNumbers            Boolean  @default(false)
-  sendTenantIdInDial     Boolean  @default(true)
-  autoDialOnClick        Boolean  @default(false)
-  blockDnc               Boolean  @default(false)
-  dncNumbers             String   @default("")
-  createdAt              DateTime @default(now())
-  updatedAt              DateTime @updatedAt
+  callMethod            String   @default("SERVER_API")
+  defaultDockState      String   @default("COLLAPSED")
+  theme                 String   @default("CRM")
+  productionOrigin      String?
+  duplicateGuardSeconds Int      @default(10)
+  callsPerMinute        Int      @default(10)
+  maskNumbers           Boolean  @default(false)
+  sendTenantIdInDial    Boolean  @default(true)
+  autoDialOnClick       Boolean  @default(false)
+  blockDnc              Boolean  @default(false)
+  dncNumbers            String   @default("")
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
 
   @@map("telephony_settings")
 }
@@ -2670,17 +2796,17 @@ model TelephonyAgentPermission {
 
 // Legacy REST click-to-call request log. Retained but unused; recent calls come from CallDetail.
 model TelephonyRequestLog {
-  id            String   @id @default(cuid())
-  tenantId      String
-  userId        String
-  leadId        String?
-  maskedNumber  String?
-  step          String
-  code          String
-  httpStatus    Int?
-  durationMs    Int?
-  reason        String?
-  createdAt     DateTime @default(now())
+  id           String   @id @default(cuid())
+  tenantId     String
+  userId       String
+  leadId       String?
+  maskedNumber String?
+  step         String
+  code         String
+  httpStatus   Int?
+  durationMs   Int?
+  reason       String?
+  createdAt    DateTime @default(now())
 
   @@index([tenantId, createdAt])
   @@map("telephony_request_logs")
@@ -2717,18 +2843,18 @@ model PlatformDashboardDefinition {
 }
 
 model PlatformReportExecutionAudit {
-  id            String   @id @default(cuid())
-  actorId       String
-  operation     String
-  targetType    String
-  targetId      String?
-  tenantIds     Json?
-  resultCount   Int?
-  filters       Json?
-  durationMs    Int?
-  succeeded     Boolean  @default(true)
-  errorCode     String?
-  createdAt     DateTime @default(now())
+  id          String   @id @default(cuid())
+  actorId     String
+  operation   String
+  targetType  String
+  targetId    String?
+  tenantIds   Json?
+  resultCount Int?
+  filters     Json?
+  durationMs  Int?
+  succeeded   Boolean  @default(true)
+  errorCode   String?
+  createdAt   DateTime @default(now())
 
   @@index([actorId, createdAt])
   @@index([targetType, targetId, createdAt])
